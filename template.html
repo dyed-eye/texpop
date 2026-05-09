@@ -268,20 +268,36 @@
         if (!dm) return null;
         let bodyHtml = html.substring(dm.index + dm[0].length);
 
-        // markdown-it joins consecutive non-blank lines into a single <p>
-        // (with literal \n between them when breaks:false). That means a
-        // closing dash line written DIRECTLY below the opener (no blank
-        // line) lands inside the SAME paragraph as the opener, instead of
-        // becoming its own sibling <p>. Detect that case here so the
-        // callout closes at the embedded marker and any text written AFTER
-        // the close (still in the same source paragraph) flows back out.
-        const embeddedCloseRe = /(?:^|\n)[ \t]*(?:[─━]{3,}|—{3,}|-{3,}|={3,})[ \t]*(?=\n|$)/;
-        const ec = bodyHtml.match(embeddedCloseRe);
+        // Contract: every callout is ALWAYS closed by a trailing dash bar
+        // (3+ run of box-drawing or ASCII dashes). markdown-it joins
+        // consecutive non-blank lines into a single <p> with literal \n
+        // separators (breaks:false), so when the closing bar is written
+        // directly below the opener (no blank line), it lands inside the
+        // SAME paragraph as the opener.
+        //
+        // Strategy: find the LAST dash run of 3+ chars anywhere in
+        // bodyHtml. That run is the closer. Strip it. Anything after it
+        // (still in this same source paragraph) becomes a sibling <p>
+        // emitted after the callout.
+        //
+        // If no second dash run exists in this paragraph, the close must
+        // be in a sibling element — fall back to the absorption loop in
+        // transformCallouts.
+        const allDashesRe = /(?:[─━]{3,}|—{3,}|-{3,}|={3,})/g;
+        let lastDash = null;
+        let dmIter;
+        while ((dmIter = allDashesRe.exec(bodyHtml)) !== null) lastDash = dmIter;
         let afterHtml = "";
         let selfClosed = false;
-        if (ec) {
-            afterHtml  = bodyHtml.substring(ec.index + ec[0].length).replace(/^\n+/, "");
-            bodyHtml   = bodyHtml.substring(0, ec.index);
+        if (lastDash) {
+            const closeStart = lastDash.index;
+            const closeEnd   = closeStart + lastDash[0].length;
+            // Trim whitespace adjacent to the close marker so body doesn't
+            // end with " "/"\n" and the after-text doesn't start with one.
+            const bodyBefore = bodyHtml.substring(0, closeStart).replace(/[ \t\r\n]+$/, "");
+            const after      = bodyHtml.substring(closeEnd).replace(/^[ \t\r\n]+/, "");
+            bodyHtml   = bodyBefore;
+            afterHtml  = after;
             selfClosed = true;
         }
         return { label, bodyHtml, afterHtml, selfClosed, container: el };
