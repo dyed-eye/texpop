@@ -9,7 +9,7 @@
 **The last assistant message renders as Markdown + LaTeX in a window that overlays the terminal exactly.**
 **`Esc` closes. Press the hotkey again to refresh with the latest reply.**
 
-`texpop` is a **LaTeX parser for Claude Code** and a math renderer for Claude Code that lives outside your editor. If you use Claude Code or the Codex CLI inside Windows Terminal, conhost, WezTerm, or any other Windows console, texpop is the Claude Code popup that finally makes Markdown LaTeX preview work — KaTeX rendering, focused chat detection, DPI-correct overlay, fully offline. No VS Code required, no browser tab juggling, no Tampermonkey scripts that only target the web app.
+texpop is for the people who ask AI assistants to *derive* things, not just refactor them — students, researchers, anyone whose terminal output contains more `\sum` than `;`. The reasoning is already in your transcript on disk; texpop just renders it where it's legible. It's a **LaTeX parser for Claude Code** (and Codex, experimentally) for Windows Terminal, conhost, WezTerm, and the rest of the post-VS-Code world: KaTeX, focused-chat detection, DPI-correct overlay, fully offline.
 
 ---
 
@@ -39,6 +39,11 @@ Every existing LaTeX renderer for Claude assumes you live in a specific surface.
 
 ## Comparison
 
+If you run Claude Code in a terminal, texpop is the only choice — every other tool requires you to be either in VS Code or in the browser.
+
+<details>
+<summary>Full feature comparison vs every other LaTeX renderer in the Claude orbit</summary>
+
 | Tool | Surface | LaTeX render | Markdown + math context | Picks focused chat | Window matches terminal | Custom callouts | Offline |
 |---|---|:---:|:---:|:---:|:---:|:---:|:---:|
 | **texpop** | Terminal (Windows Terminal, conhost, WezTerm, ...) | ✅ KaTeX | ✅ | ✅ | ✅ | ✅ | ✅ |
@@ -47,7 +52,7 @@ Every existing LaTeX renderer for Claude assumes you live in a specific surface.
 | Claude-LaTeX-Parser (Tampermonkey) | claude.ai web only | ✅ | partial | ❌ | ❌ | ❌ | ❌ |
 | Claude-LaTeX-Math-Renderer (Tampermonkey) | claude.ai web only | ✅ | partial | ❌ | ❌ | ❌ | ❌ |
 
-If you run Claude Code in a terminal, texpop is the only choice — every other tool requires you to be either in VS Code or in the browser.
+</details>
 
 ---
 
@@ -109,112 +114,19 @@ Typical workflow: you're chatting with Claude Code about a physics or math probl
 
 ## How it picks the focused chat
 
-This is the part most LaTeX preview tools skip. If you have three Claude Code sessions running in three Windows Terminal tabs, "newest `.jsonl`" is wrong — the active tab might not be the most recently written one. texpop runs a cascade:
-
-1. **Capture the foreground HWND** the moment the hotkey fires.
-2. **If the foreground process is `WindowsTerminal.exe`**, query UIAutomation to read the **selected** `TabItem`'s name. That's whatever Windows Terminal currently displays on the active tab.
-3. **Walk the foreground process tree** via `Win32_Process`, collecting every descendant — `claude.exe`, `node.exe` running Claude Code, `codex.exe`, `node.exe` running Codex, anything an adapter cares about.
-4. **Read each candidate's current working directory** by opening the process with `PROCESS_QUERY_INFORMATION | PROCESS_VM_READ`, calling `NtQueryInformationProcess` to get the PEB base address, then `ReadProcessMemory` to chase `PEB → ProcessParameters → CurrentDirectory.DosPath`. That's the CWD as the process actually sees it.
-5. **Map each CWD to its Claude project directory** under `~/.claude/projects/<encoded-path>/` (the same encoding Claude Code uses).
-6. **Scan each candidate project's `.jsonl` transcripts** for `{"type":"ai-title","aiTitle":"..."}` events.
-7. **Match against the Windows Terminal tab title.** The session whose `aiTitle` matches the WT tab name (or the foreground window title for non-WT terminals) wins — that's the focused chat.
-8. **Fall back to "newest `.jsonl` among candidates"** if no `aiTitle` matches, then to "globally newest `.jsonl`" if process tree detection failed entirely.
-
-The heavy lifting lives in `show.ps1` (orchestrator) and `adapters/claude-code.ps1` (the canonical adapter implementation). Run `Ctrl + Alt + Shift + V` to see the whole cascade in `%TEMP%\texpop-debug.log`.
+texpop matches the foreground window's chat title against the `aiTitle` recorded in each Claude Code transcript on disk — the session whose stored title matches the active tab wins. Press `Ctrl + Alt + Shift + V` to dump the full detection cascade to `%TEMP%\texpop-debug.log` if it ever picks the wrong chat.
 
 ---
 
 ## Customisation
 
-### Change the hotkey
-
-Open `texpop.ahk`. Find:
-
-```ahk
-#HotIf IsTerminalActive()
-^!v::TriggerPopup
-^+!v::TriggerDiagnose
-#HotIf
-```
-
-Replace `^!v` and `^+!v` with any AutoHotkey v2 combo. Quick cheatsheet:
-
-| AHK | Combo |
+| What | How |
 |---|---|
-| `^` | Ctrl |
-| `!` | Alt |
-| `+` | Shift |
-| `#` | Win |
-| `^!l` | Ctrl + Alt + L |
-| `^+m` | Ctrl + Shift + M |
-| `!F1` | Alt + F1 |
-| `#l` | Win + L (avoid — locks Windows) |
-
-Save and right-click the tray icon → **Reload Script**.
-
-### Replace the icon
-
-texpop resolves the popup favicon in this order, first match wins:
-
-1. `assets/icon-override.svg`
-2. `assets/icon-override.png`
-3. `assets/icon-override.jpg`
-4. `assets/icon-override.ico`
-5. `assets/icon-default.svg` (the bundled Tokyo-Night `ψ`)
-
-Drop your file into `assets/` with the right name and the popup uses it on the next launch. If the favicon doesn't update, delete `%LOCALAPPDATA%\texpop\edge-profile-v2` to nuke Edge's icon cache.
-
-### Add a callout type
-
-texpop's callout transformer fires on patterns like `* Label ──── body ────` at the start of a paragraph or list item. The callout class becomes `callout-<lowercased-label>`. To style a new label `Mytype`, add a CSS rule in `template.html` next to the existing `.callout-warning` / `.callout-tip` / `.callout-danger` blocks:
-
-```css
-.callout-mytype {
-  border-color: rgba(180, 142, 173, 0.32);
-  background: linear-gradient(135deg, rgba(180,142,173,0.10), rgba(180,142,173,0.02));
-}
-.callout-mytype .callout-label { color: #b48ead; }
-.callout-mytype .callout-label::before {
-  background: #b48ead;
-  box-shadow: 0 0 0 4px rgba(180,142,173,0.20),
-              0 0 12px rgba(180,142,173,0.55);
-}
-.callout-mytype .callout-label::after {
-  background: linear-gradient(90deg, rgba(180,142,173,0.55), transparent);
-}
-```
-
-Then any reply containing `* Mytype ──── ...` renders with your palette. Built-in palettes already cover Insight, Tip, Note, Warning, Caution, Warn, Danger, Error, and Key-Takeaway.
-
-### Add a terminal exe
-
-If your terminal isn't allowlisted, the hotkey won't fire. Add it to the `TerminalExes` array near the top of `texpop.ahk`:
-
-```ahk
-TerminalExes := [
-    "WindowsTerminal.exe",
-    "conhost.exe",
-    "powershell.exe",
-    "pwsh.exe",
-    "cmd.exe",
-    "wezterm-gui.exe",
-    "alacritty.exe",
-    "Hyper.exe",
-    "your-terminal.exe"
-]
-```
-
-Reload the script (tray icon → **Reload Script**).
-
-### Custom window size
-
-texpop auto-sizes the popup to the foreground terminal's pixel rectangle (DPI-corrected). To override, call `show.ps1` directly with explicit dimensions:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File show.ps1 -Width 900 -Height 700
-```
-
-If the foreground rect is unusable (very small or off-screen), texpop falls back to the `-Width` / `-Height` defaults (720 × 540).
+| Change the hotkey | Edit `^!v::` and `^+!v::` lines in `texpop.ahk`, right-click the tray icon → **Reload Script**. AHK v2 modifiers: `^`=Ctrl, `!`=Alt, `+`=Shift, `#`=Win |
+| Replace the icon | Drop a file at `assets/icon-override.{svg,png,jpg,ico}` — first match wins. The bundled fallback is `icon-default.ico` (Tokyo-Night `ϕ`). If it doesn't refresh, delete `%LOCALAPPDATA%\texpop\edge-profile-v3` |
+| Add a callout palette | Add a `.callout-yourname { ... }` rule in `template.html` next to the existing `.callout-warning` / `.callout-tip` / `.callout-danger` blocks. Built-in palettes already cover Insight, Tip, Note, Warning, Caution, Warn, Danger, Error, Key-Takeaway |
+| Add a terminal exe | Append to the `TerminalExes` array near the top of `texpop.ahk`, reload the script |
+| Override popup dimensions | Call `show.ps1 -Width 900 -Height 700` directly. Default behaviour matches the foreground terminal's DPI-corrected pixel rectangle |
 
 ---
 
