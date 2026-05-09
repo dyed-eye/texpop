@@ -131,6 +131,52 @@ public static class Native {
         return r;
     }
 
+    public static RECT GetWindowRectPhys(IntPtr h) {
+        IntPtr prev = IntPtr.Zero;
+        try { prev = SetThreadDpiAwarenessContext(DPI_PER_MON_V2); } catch { }
+        var r = new RECT();
+        if (h == IntPtr.Zero) return r;
+        int hr = DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT)));
+        if (hr != 0) GetWindowRect(h, out r);
+        return r;
+    }
+
+    public static string GetWindowTitle(IntPtr h) {
+        if (h == IntPtr.Zero) return "";
+        var sb = new StringBuilder(512);
+        GetWindowText(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr hWnd);
+
+    public delegate bool EnumWindowsCb(IntPtr hWnd, IntPtr lParam);
+    [DllImport("user32.dll")]
+    public static extern bool EnumWindows(EnumWindowsCb lpEnumFunc, IntPtr lParam);
+
+    public static IntPtr FindFirstVisibleHwndForPids(int[] pids) {
+        var pidSet = new System.Collections.Generic.HashSet<uint>();
+        foreach (var p in pids) pidSet.Add((uint)p);
+        IntPtr matched = IntPtr.Zero;
+        EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            int len = GetWindowTextLength(hWnd);
+            if (len <= 0) return true; // skip toolwindows / hidden helpers
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pidSet.Contains(pid)) {
+                matched = hWnd;
+                return false; // stop
+            }
+            return true;
+        }, IntPtr.Zero);
+        return matched;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern int GetWindowTextLength(IntPtr hWnd);
+
     public static uint GetForegroundDpi() {
         IntPtr h = GetForegroundWindow();
         if (h == IntPtr.Zero) return 96;
@@ -320,6 +366,33 @@ function Find-FocusedSession {
     try { $fgProc = Get-Process -Id $fgPid -ErrorAction Stop } catch { }
     $fgName = if ($fgProc) { $fgProc.ProcessName } else { "<unknown>" }
     Log "Foreground process: $fgName.exe (pid $fgPid)"
+
+    # If foreground is a TeXpop popup, the captured rect is the popup's, not
+    # the terminal's. Walk visible windows for the most recent terminal window
+    # and reuse its rect, HWND, title, and DPI.
+    if ($fgName -ieq 'msedge' -and $fgTitle -like '*TeXpop*') {
+        Log "Foreground is the TeXpop popup itself - looking for the actual terminal"
+        try {
+            $termPids = Get-CimInstance Win32_Process -Filter "Name='WindowsTerminal.exe' OR Name='conhost.exe' OR Name='wezterm-gui.exe' OR Name='alacritty.exe' OR Name='Hyper.exe'" `
+                -Property ProcessId, Name -ErrorAction Stop |
+                ForEach-Object { [int]$_.ProcessId }
+            if ($termPids) {
+                $termHwnd = [LatexPopup.Native]::FindFirstVisibleHwndForPids([int[]]$termPids)
+                if ($termHwnd -ne [IntPtr]::Zero) {
+                    [void][LatexPopup.Native]::GetWindowThreadProcessId($termHwnd, [ref]$null)
+                    $tRect = [LatexPopup.Native]::GetWindowRectPhys($termHwnd)
+                    $tTitle = [LatexPopup.Native]::GetWindowTitle($termHwnd)
+                    Log "Re-targeted to terminal HWND=0x$([Convert]::ToString([int64]$termHwnd, 16)) Title='$tTitle' rect=L=$($tRect.Left) T=$($tRect.Top) R=$($tRect.Right) B=$($tRect.Bottom)"
+                    $fgHwnd  = $termHwnd
+                    $fgTitle = $tTitle
+                    $script:fgRectAtStart = $tRect
+                    $fgPid = 0  # so the WT-UIA branch below is skipped (we don't have a fresh WT pid)
+                } else {
+                    Log "No visible terminal window found - keeping popup rect (popup will land on top of itself)"
+                }
+            }
+        } catch { Log "Re-targeting threw: $_" }
+    }
 
     # If WT, capture the selected tab's UIA name for use in title matching below.
     $wtTabName = $null
