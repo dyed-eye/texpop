@@ -103,24 +103,6 @@ function Read-ClaudeJsonlTail {
     }
 }
 
-# Get the timestamp (DateTime?) of the latest assistant *text* turn in $lines.
-# Returns $null if not found.
-function Get-LatestAssistantTextTime {
-    param([string[]]$lines)
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        $line = $lines[$i]
-        if (-not $line) { continue }
-        if ($line.Length -lt 80) { continue }
-        if (-not $line.Contains('"role":"assistant"')) { continue }
-        if (-not $line.Contains('"type":"text"')) { continue }
-        $m = [regex]::Match($line, '"timestamp":"([^"]+)"')
-        if ($m.Success) {
-            try { return [DateTime]::Parse($m.Groups[1].Value).ToUniversalTime() } catch { }
-        }
-    }
-    return $null
-}
-
 # Return the most recent ExitPlanMode tool_use line (raw JSON string) that has
 # NOT been resolved by a following tool_result. Returns $null if none active.
 function Get-ActivePlanModeLine {
@@ -170,88 +152,24 @@ function Get-PlanModeMarkdown {
     return $null
 }
 
-# Find the most recent aside_question subagent jsonl whose mtime is newer than
-# the latest assistant text turn in the parent transcript. Returns the
-# [FileInfo] or $null.
-function Find-ActiveAsideSubagent {
-    param([System.IO.FileInfo]$parentFile, [DateTime]$lastAssistantUtc)
-    $sessionDir = [System.IO.Path]::Combine(
-        $parentFile.DirectoryName,
-        [System.IO.Path]::GetFileNameWithoutExtension($parentFile.Name))
-    $subDir = Join-Path $sessionDir 'subagents'
-    if (-not (Test-Path $subDir)) { return $null }
-    $candidates = Get-ChildItem -Path $subDir -Filter 'agent-aside_question-*.jsonl' -File `
-        -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending
-    if (-not $candidates) { return $null }
-    $newest = $candidates | Select-Object -First 1
-    # The subagent file must be newer than the parent's last assistant text
-    # turn -- else the assistant has already moved past the aside.
-    $newestUtc = $newest.LastWriteTimeUtc
-    if ($newestUtc -le $lastAssistantUtc) { return $null }
-    return $newest
-}
-
-# Pull the last assistant text-only turn out of a sidechain subagent jsonl.
-function Get-AsideMarkdown {
-    param([System.IO.FileInfo]$file)
-    $lines = Read-ClaudeJsonlTail -file $file -maxBytes 800000
-    if (-not $lines) { return $null }
-    # Walk backward, collect text from the latest end_turn assistant message.
-    $sb = [System.Text.StringBuilder]::new()
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        $line = $lines[$i]
-        if (-not $line) { continue }
-        if ($line.Length -lt 80) { continue }
-        if (-not $line.Contains('"role":"assistant"')) { continue }
-        if (-not $line.Contains('"type":"text"')) { continue }
-        try {
-            $obj = $line | ConvertFrom-Json -ErrorAction Stop
-        } catch { continue }
-        if (-not $obj.message -or -not $obj.message.content) { continue }
-        foreach ($c in @($obj.message.content)) {
-            if ($c.type -eq 'text' -and $c.text) {
-                [void]$sb.Insert(0, $c.text)
-            }
-        }
-        if ($sb.Length -gt 0) { break }
-    }
-    if ($sb.Length -eq 0) { return $null }
-    return $sb.ToString()
-}
-
-# Return @{ kind = 'plan' | 'btw'; markdown = '...' } or $null.
+# Return @{ kind = 'plan'; markdown = '...' } or $null.
 # Modal detection: if the most-recent significant event in the transcript is an
-# unresolved plan-mode preview OR an /aside (~= /btw) subagent answer that
-# postdates the last assistant text turn, render that instead.
+# unresolved plan-mode preview, render that instead. /aside detection is
+# text-marker-based and lives in the GetLastAssistantTurn scriptblock.
 function Get-ClaudeActiveModalContent {
     param([System.IO.FileInfo]$file)
 
     $lines = Read-ClaudeJsonlTail -file $file
     if (-not $lines -or $lines.Count -eq 0) { return $null }
 
-    $lastAssistantUtc = Get-LatestAssistantTextTime -lines $lines
-    if (-not $lastAssistantUtc) { $lastAssistantUtc = [DateTime]::MinValue }
-
-    # 1. Plan mode -- only consider it active when no tool_result has resolved
-    #    it yet. This is the strongest "modal" signal.
+    # Plan mode -- only consider it active when no tool_result has resolved
+    # it yet. This is the strongest "modal" signal.
     $planLine = Get-ActivePlanModeLine -lines $lines
     if ($planLine) {
         $planMd = Get-PlanModeMarkdown -line $planLine
         if ($planMd) {
             $header  = "## Plan mode active`r`n`r`n> Awaiting your approval`r`n`r`n"
             return @{ kind = 'plan'; markdown = $header + $planMd }
-        }
-    }
-
-    # 2. /aside (a.k.a. /btw) -- the aside subagent jsonl mtime postdates the
-    #    main transcript's last assistant text turn.
-    $aside = Find-ActiveAsideSubagent -parentFile $file -lastAssistantUtc $lastAssistantUtc
-    if ($aside) {
-        $asideMd = Get-AsideMarkdown -file $aside
-        if ($asideMd) {
-            $header  = "## /aside`r`n`r`n> Side question response`r`n`r`n"
-            return @{ kind = 'btw'; markdown = $header + $asideMd }
         }
     }
 
@@ -356,8 +274,8 @@ $claudeFindFocused = {
 $claudeGetLastAssistantTurn = {
     param([System.IO.FileInfo]$file)
 
-    # Modal-first: plan-mode preview or /aside answer takes precedence over
-    # the previous full assistant turn. Falls through if neither is active.
+    # Modal-first: plan-mode preview takes precedence over the latest assistant
+    # turn. /aside is detected by text marker after the turn is extracted.
     try {
         $modal = Get-ClaudeActiveModalContent -file $file
     } catch {
@@ -419,7 +337,25 @@ $claudeGetLastAssistantTurn = {
             }
         } catch { }
     }
-    return $sb.ToString()
+
+    $turn = $sb.ToString()
+    if (-not $turn) { return '' }
+
+    # /aside detection -- text-marker-based. The /aside slash command produces
+    # a regular assistant turn whose text begins with "ASIDE:" (sometimes
+    # wrapped in a Markdown code-fence per the command's example output).
+    $leading = $turn.TrimStart()
+    $fenceMatch = [regex]::Match($leading, '^(?:`{3,}|~{3,})[^\r\n]*\r?\n')
+    if ($fenceMatch.Success) {
+        $leading = $leading.Substring($fenceMatch.Length)
+    }
+    if ($leading -match '^\s*ASIDE\s*:') {
+        Log "Parser[claude]: /aside marker detected  len=$($turn.Length)"
+        $header = "## /aside`r`n`r`n> Side question response`r`n`r`n"
+        return $header + $turn
+    }
+
+    return $turn
 }
 
 $script:Adapters += @(
