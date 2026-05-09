@@ -669,6 +669,22 @@ public static System.IntPtr FindWindowContaining(string substr) {
                 Log "FindWindowContaining matched 'TeXpop' on attempt $($i+1) (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
                 # SW_SHOW = 5 -- ensure visible & not minimized
                 [LatexPopupSwp.Win]::ShowWindow($h, 5) | Out-Null
+
+                # Force the popup's rect to match the captured terminal rect.
+                # Edge's --user-data-dir stores window state per-app and restores
+                # it on subsequent launches, overriding --window-size /
+                # --window-position. SetWindowPos here is authoritative.
+                if ($script:fgRectAtStart) {
+                    $r = $script:fgRectAtStart
+                    $w = $r.Right  - $r.Left
+                    $hh = $r.Bottom - $r.Top
+                    if ($w -gt 200 -and $hh -gt 150) {
+                        # SWP_NOZORDER = 0x0004 -- don't disturb z-order yet
+                        [LatexPopupSwp.Win]::SetWindowPos($h, [IntPtr]::Zero, $r.Left, $r.Top, $w, $hh, 0x0004) | Out-Null
+                        Log "Forced popup rect to terminal: $($r.Left),$($r.Top) size $w x $hh"
+                    }
+                }
+
                 # Briefly topmost to lift z-order, then back to normal so it
                 # behaves like a regular window (focusable, not pinned).
                 # HWND_TOPMOST = -1, HWND_NOTOPMOST = -2, SWP_NOMOVE|SWP_NOSIZE = 0x0003
