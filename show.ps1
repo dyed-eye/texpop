@@ -527,6 +527,55 @@ if ($script:fgRectAtStart) {
 }
 
 if ($edge) {
+    # Close any existing TeXpop popup BEFORE launching the new one. Edge --app
+    # mode with the same URL + user-data-dir would otherwise refocus the
+    # existing window without reloading, leaving stale content. Each hotkey
+    # press should show the current focused chat, so kill the old popup first.
+    if (-not ('LatexPopupCloser.Win' -as [type])) {
+        Add-Type -Namespace LatexPopupCloser -Name Win -MemberDefinition @'
+public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Auto)]
+public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetWindowTextLength(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindowVisible(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+
+public static int CloseAllByTitleSubstring(string substr) {
+    int closed = 0;
+    System.Collections.Generic.List<System.IntPtr> targets = new System.Collections.Generic.List<System.IntPtr>();
+    EnumWindows((hWnd, lParam) => {
+        if (!IsWindowVisible(hWnd)) return true;
+        int len = GetWindowTextLength(hWnd);
+        if (len <= 0) return true;
+        var sb = new System.Text.StringBuilder(len + 1);
+        GetWindowText(hWnd, sb, sb.Capacity);
+        if (sb.ToString().IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) >= 0) {
+            targets.Add(hWnd);
+        }
+        return true;
+    }, System.IntPtr.Zero);
+    foreach (var h in targets) {
+        // WM_CLOSE = 0x0010
+        SendMessage(h, 0x0010, System.IntPtr.Zero, System.IntPtr.Zero);
+        closed++;
+    }
+    return closed;
+}
+'@ -ErrorAction SilentlyContinue
+    }
+    try {
+        $closed = [LatexPopupCloser.Win]::CloseAllByTitleSubstring('TeXpop')
+        if ($closed -gt 0) {
+            Log "Closed $closed existing TeXpop popup window(s) before relaunch"
+            Start-Sleep -Milliseconds 150  # give Edge time to actually close
+        }
+    } catch { Log "Pre-launch close threw: $_" }
+
     $edgeArgs = @(
         "--app=$fileUri",
         "--window-size=$winW,$winH",
