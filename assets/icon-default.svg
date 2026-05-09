@@ -5,23 +5,23 @@
       <stop offset="0%" stop-color="#7aa2f7"/>
       <stop offset="100%" stop-color="#bb9af7"/>
     </linearGradient>
-    <radialGradient id="glow" cx="50%" cy="55%" r="48%">
-      <stop offset="0%" stop-color="#7aa2f7" stop-opacity="0.32"/>
-      <stop offset="70%" stop-color="#7aa2f7" stop-opacity="0.06"/>
-      <stop offset="100%" stop-color="#7aa2f7" stop-opacity="0"/>
-    </radialGradient>
   </defs>
-  <rect x="0" y="0" width="64" height="64" rx="14" ry="14" fill="#1a1b26"/>
-  <rect x="2.5" y="2.5" width="59" height="59" rx="12" ry="12"
-        fill="none" stroke="#7aa2f7" stroke-opacity="0.5" stroke-width="1"/>
-  <circle cx="32" cy="34" r="22" fill="url(#glow)"/>
+  <!-- Background tile, fully opaque -->
+  <rect x="0" y="0" width="64" height="64" rx="13" ry="13" fill="#1a1b26"/>
   <!--
-    Greek letter psi drawn as paths (not font glyphs). Crisp at any
-    rasterization size; no Cambria-Math fallback fuzziness.
+    Greek psi drawn as a single bold filled shape (not strokes).
+    Filled shapes survive aggressive downscaling far better than thin
+    strokes. Thicker arms, slightly wider stem, and we drop the
+    decorative inner border + glow because they vanish at 32x32 anyway.
   -->
-  <g stroke="url(#g)" stroke-width="4" fill="none"
-     stroke-linecap="round" stroke-linejoin="round">
-    <line x1="32" y1="12" x2="32" y2="56"/>
-    <path d="M 14 14 Q 14 36 32 36 Q 50 36 50 14"/>
+  <g fill="url(#g)">
+    <!-- Vertical stem: rounded rectangle from y=10 to y=58, 8px wide -->
+    <rect x="28" y="10" width="8" height="48" rx="4" ry="4"/>
+    <!-- Left arm: rounded rectangle rotated about its base -->
+    <rect x="10" y="14" width="8" height="22" rx="4" ry="4"/>
+    <!-- Right arm: mirror of left -->
+    <rect x="46" y="14" width="8" height="22" rx="4" ry="4"/>
+    <!-- Horizontal connector at the base of the U (joins all three) -->
+    <rect x="10" y="32" width="44" height="8" rx="4" ry="4"/>
   </g>
 </svg>
