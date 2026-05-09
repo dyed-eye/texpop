@@ -365,6 +365,18 @@
                     cursorAfter = cur;       // leave for next iteration
                     break;
                 }
+                // Edge case: a paragraph that has body text AND ends with a
+                // standalone close-line. Markdown-it's blank-line rule splits
+                // the callout body across multiple <p>s, with the trailing
+                // dashes living on the last paragraph after a soft line break.
+                // Detect that, absorb the paragraph minus the close, and stop.
+                const trailDashRe = /[\s]*[─━—=\-]{3,}[\s]*$/;
+                if (cur.nodeType === Node.ELEMENT_NODE && trailDashRe.test(cur.textContent || "")) {
+                    body.appendChild(cur);
+                    stripTrailingDecorations(body); // peels the trailing dashes
+                    cursorAfter = after;
+                    break;
+                }
                 body.appendChild(cur);       // moves cur out of root into body
                 cur = after;
                 cursorAfter = after;
