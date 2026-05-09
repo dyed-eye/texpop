@@ -6,22 +6,15 @@
       <stop offset="100%" stop-color="#bb9af7"/>
     </linearGradient>
   </defs>
-  <!-- Background tile, fully opaque -->
+  <!-- Background tile -->
   <rect x="0" y="0" width="64" height="64" rx="13" ry="13" fill="#1a1b26"/>
   <!--
-    Greek psi drawn as a single bold filled shape (not strokes).
-    Filled shapes survive aggressive downscaling far better than thin
-    strokes. Thicker arms, slightly wider stem, and we drop the
-    decorative inner border + glow because they vanish at 32x32 anyway.
+    Greek varphi (phi) drawn as a bold solid stem + thick hollow ellipse.
+    Both shapes use ~7-8 unit thickness in this 64-viewBox so they
+    stay >=3px even when downscaled to 32x32 for the Windows taskbar.
   -->
-  <g fill="url(#g)">
-    <!-- Vertical stem: rounded rectangle from y=10 to y=58, 8px wide -->
-    <rect x="28" y="10" width="8" height="48" rx="4" ry="4"/>
-    <!-- Left arm: rounded rectangle rotated about its base -->
-    <rect x="10" y="14" width="8" height="22" rx="4" ry="4"/>
-    <!-- Right arm: mirror of left -->
-    <rect x="46" y="14" width="8" height="22" rx="4" ry="4"/>
-    <!-- Horizontal connector at the base of the U (joins all three) -->
-    <rect x="10" y="32" width="44" height="8" rx="4" ry="4"/>
-  </g>
+  <!-- Hollow loop: ellipse with thick stroke. Stroke-width 7 -> ~3.5px at 32x32 -->
+  <ellipse cx="32" cy="32" rx="20" ry="12" fill="none" stroke="url(#g)" stroke-width="7"/>
+  <!-- Vertical stem: filled rectangle, full height, slight rounding -->
+  <rect x="28" y="6" width="8" height="52" rx="4" ry="4" fill="url(#g)"/>
 </svg>
