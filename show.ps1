@@ -1,19 +1,21 @@
-# show.ps1 -- Render the focused Claude Code session's last assistant message.
+# show.ps1 -- Render the focused AI CLI session's last assistant message.
 #
 # Part of texpop (https://github.com/dyed-eye/texpop).
 #
 # Detection cascade:
 #   1. If foreground window is Windows Terminal, use UIAutomation to query
 #      the SELECTED TabItem's name; try to extract a path from it.
-#   2. Walk foreground process tree, find claude / node-claude descendants,
-#      read each one's CWD via PEB (NtQueryInformationProcess + ReadProcessMemory).
-#   3. Map a CWD to ~/.claude/projects/<encoded>/ and pick newest .jsonl in it.
-#   4. Fallback: newest .jsonl globally (excluding subagents/.backups).
+#   2. Walk foreground process tree, collect candidate CLI processes
+#      (claude.exe / node.exe+claude / codex.exe / node.exe+codex / ...).
+#   3. Run each registered ChatSourceAdapter's Match block; first match wins.
+#      The adapter's FindFocusedSession picks a transcript file, then its
+#      GetLastAssistantTurn returns the last assistant message as Markdown.
+#   4. Fallback: newest .jsonl globally under ~/.claude/projects (excluding
+#      subagents/.backups). Codex-only sessions still need a Claude project
+#      dir for this fallback to fire -- in that case the adapter's own
+#      FindFocusedSession should have already returned a result.
 #
-# Parsing speed:
-#   - Read only the last ~500KB of the picked .jsonl (backward).
-#   - Find the LAST line with assistant text; capture its requestId.
-#   - Concatenate text from all lines sharing that requestId.
+# Adapters live in adapters\<name>.ps1 and are dot-sourced below.
 #
 # Debugging:
 #   - Always writes %TEMP%\texpop-debug.log
@@ -59,7 +61,7 @@ function Flush-Log {
 Log "=== texpop show.ps1 run ==="
 Log "ProjectsRoot=$ProjectsRoot  Diagnose=$Diagnose"
 
-# Captured inside Find-FocusedSessionFile; reused at Edge-launch time to size/position
+# Captured inside Find-FocusedSession; reused at Edge-launch time to size/position
 # the popup so it overlaps the terminal window exactly.
 $script:fgRectAtStart = $null
 
@@ -262,99 +264,35 @@ function Get-WtSelectedTabInfo {
     return $name
 }
 
-# ---------- Find focused session file ----------
+# ---------- Adapter loading ----------
 
-function Resolve-ProjectDirForCwd {
-    param([string]$cwd, [string]$projectsRoot)
-    if (-not $cwd) { return $null }
-    $encoded = $cwd.Replace(':', '-').Replace('\', '-').Replace('.', '-')
-    $candidates = @(
-        $encoded,
-        ($encoded.Substring(0,1).ToLower() + $encoded.Substring(1))
-    )
-    foreach ($c in $candidates) {
-        $p = Join-Path $projectsRoot $c
-        if (Test-Path $p) {
-            Log "  CWD '$cwd' -> project dir '$c'"
-            return $p
-        }
-    }
-    Log "  CWD '$cwd' -> NO project dir match (tried: $($candidates -join ', '))"
-    return $null
-}
+# Each adapter file appends a hashtable to $script:Adapters with keys:
+#   Name, Description, Match, FindFocusedSession, GetLastAssistantTurn.
+# See adapters\claude-code.ps1 for the canonical example.
+$script:Adapters = @()
+$script:ClaudeProjectsRoot = $ProjectsRoot
 
-function Find-NewestJsonl {
-    param([string]$projectDir)
-    Get-ChildItem -Path $projectDir -Filter '*.jsonl' -File `
-        -ErrorAction SilentlyContinue |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
-}
-
-# Read last ~60KB of a jsonl, find the most recent {"type":"ai-title","aiTitle":"..."} line.
-function Get-AiTitle {
-    param([System.IO.FileInfo]$file)
-    try {
-        $size      = $file.Length
-        $chunkSize = [int][Math]::Min(60000, $size)
-        $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+$adapterDir = Join-Path $scriptDir 'adapters'
+if (Test-Path $adapterDir) {
+    $adapterFiles = Get-ChildItem -Path $adapterDir -Filter '*.ps1' -File `
+        -ErrorAction SilentlyContinue | Sort-Object Name
+    foreach ($af in $adapterFiles) {
         try {
-            if ($size -gt $chunkSize) {
-                $stream.Seek(-$chunkSize, [System.IO.SeekOrigin]::End) | Out-Null
-            }
-            $buf = [byte[]]::new([int][Math]::Min($size, $chunkSize))
-            $br  = $stream.Read($buf, 0, $buf.Length)
-            $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $br)
-        } finally { $stream.Dispose() }
-
-        $matches = [regex]::Matches($text, '"aiTitle":"((?:[^"\\]|\\.)*)"')
-        if ($matches.Count -eq 0 -and $size -gt $chunkSize) {
-            # Try the head of the file too (small chats)
-            $stream2 = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
-            try {
-                $buf2 = [byte[]]::new([int][Math]::Min(60000, $size))
-                $br2  = $stream2.Read($buf2, 0, $buf2.Length)
-                $head = [System.Text.Encoding]::UTF8.GetString($buf2, 0, $br2)
-                $matches = [regex]::Matches($head, '"aiTitle":"((?:[^"\\]|\\.)*)"')
-            } finally { $stream2.Dispose() }
-        }
-        if ($matches.Count -eq 0) { return $null }
-        return $matches[$matches.Count - 1].Groups[1].Value
-    } catch { return $null }
-}
-
-function Normalize-Title {
-    param([string]$t)
-    if (-not $t) { return '' }
-    # Strip leading decoration chars (e.g. "* ", emoji, whitespace) and lowercase.
-    return (($t -replace '^[\W_]+', '').Trim().ToLower())
-}
-
-function Find-SessionByTitle {
-    param([string]$targetTitle, $projectDirs)
-    $norm = Normalize-Title $targetTitle
-    if (-not $norm) { return $null }
-    Log "Title-match target: '$targetTitle' (normalized='$norm')"
-    foreach ($pd in $projectDirs) {
-        $jsonls = Get-ChildItem -Path $pd -Filter '*.jsonl' -File `
-            -ErrorAction SilentlyContinue
-        foreach ($j in $jsonls) {
-            $title = Get-AiTitle $j
-            if (-not $title) { continue }
-            $jNorm = Normalize-Title $title
-            Log "  '$($j.Name)' aiTitle='$title' (norm='$jNorm')"
-            if ($jNorm -eq $norm) {
-                Log "  MATCH"
-                return $j
-            }
+            . $af.FullName
+            Log "Loaded adapter file: $($af.Name)"
+        } catch {
+            Log "Failed to load adapter '$($af.Name)': $_"
         }
     }
-    Log "Title-match: no aiTitle matched"
-    return $null
+} else {
+    Log "Adapter dir not found: $adapterDir"
 }
+Log "Adapters registered: $($script:Adapters.Count) -- $((($script:Adapters | ForEach-Object { $_.Name }) -join ', '))"
 
-function Find-FocusedSessionFile {
-    param([string]$projectsRoot)
+# ---------- Find focused session file (orchestrator) ----------
+
+function Find-FocusedSession {
+    # Returns @{ File = [System.IO.FileInfo]; Adapter = <hashtable> } or $null.
 
     $fgPid   = [LatexPopup.Native]::GetForegroundPid()
     $fgHwnd  = [LatexPopup.Native]::GetForegroundHwnd()
@@ -381,7 +319,11 @@ function Find-FocusedSessionFile {
         $wtTabName = Get-WtSelectedTabInfo -wtHwnd $fgHwnd
     }
 
-    # ---------- Walk process tree, collect candidate claude processes ----------
+    # ---------- Walk process tree, collect ALL candidate descendants ----------
+    # We collect every descendant process and let each adapter's Match block
+    # decide which ones it cares about. This lets a single tree contain
+    # multiple agents (e.g. WT host with one tab running claude, another
+    # running codex) without losing detection coverage.
     $procs = $null
     try {
         $procs = Get-CimInstance Win32_Process `
@@ -410,124 +352,65 @@ function Find-FocusedSessionFile {
         $kids = $childMap[$cur]
         if (-not $kids) { continue }
         foreach ($k in $kids) {
-            $name = if ($k.Name) { $k.Name.ToLower() } else { '' }
-            $cmd  = if ($k.CommandLine) { $k.CommandLine } else { '' }
-            $isClaude = ($name -eq 'claude.exe') -or
-                        (($name -eq 'node.exe') -and ($cmd -match 'claude'))
-            if ($isClaude) { $candidates += $k }
+            $candidates += $k
             $queue.Enqueue([int]$k.ProcessId)
         }
     }
 
-    Log "Tree walk: $($candidates.Count) claude candidate(s) under PID $fgPid"
+    Log "Tree walk: $($candidates.Count) descendant process(es) under PID $fgPid"
     foreach ($c in $candidates) {
         $cmdShort = if ($c.CommandLine) { ($c.CommandLine -replace '\s+', ' ').Substring(0, [Math]::Min(140, $c.CommandLine.Length)) } else { '<no cmd>' }
         Log "  candidate pid=$($c.ProcessId)  $($c.Name)  cmd='$cmdShort'"
     }
 
     if (-not $candidates) {
-        Log "No claude descendants of foreground"
+        Log "No descendant processes of foreground"
         return $null
     }
 
-    # Collect unique project dirs from candidate CWDs.
-    $projectDirs = @()
-    foreach ($c in $candidates) {
-        $cwd = $null
-        try { $cwd = [LatexPopup.Native]::GetProcessCwd([int]$c.ProcessId) } catch { Log "  PEB read pid=$($c.ProcessId) threw: $_" }
-        Log "  pid=$($c.ProcessId)  CWD='$cwd'"
-        if (-not $cwd) { continue }
-        $pd = Resolve-ProjectDirForCwd -cwd $cwd -projectsRoot $projectsRoot
-        if (-not $pd) { continue }
-        if ($projectDirs -notcontains $pd) { $projectDirs += $pd }
-    }
-    Log "Candidate project dirs: $($projectDirs.Count)"
-
-    # PRIMARY signal: match the WT/window title against ai-title in candidate jsonls.
-    $titleSources = @()
-    if ($fgTitle)   { $titleSources += $fgTitle }
-    if ($wtTabName -and ($wtTabName -ne $fgTitle)) { $titleSources += $wtTabName }
-    foreach ($t in $titleSources) {
-        $match = Find-SessionByTitle -targetTitle $t -projectDirs $projectDirs
-        if ($match) { return $match }
-    }
-
-    # Fallback: newest jsonl across candidate project dirs (heuristic).
-    $best = $null
-    foreach ($pd in $projectDirs) {
-        $j = Find-NewestJsonl $pd
-        if (-not $j) { continue }
-        Log "  fallback newest in $($pd | Split-Path -Leaf): $($j.Name) (mtime $($j.LastWriteTime))"
-        if (-not $best -or $j.LastWriteTime -gt $best.LastWriteTime) { $best = $j }
-    }
-    if ($best) { Log "Tree-walk fallback chose: $($best.FullName)" }
-    return $best
-}
-
-# ---------- Backward parser ----------
-
-function Get-LastAssistantTurn {
-    param([System.IO.FileInfo]$file)
-
-    $size      = $file.Length
-    $chunkSize = [int][Math]::Min(500000, $size)
-    $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
-    try {
-        $stream.Seek(-$chunkSize, [System.IO.SeekOrigin]::End) | Out-Null
-        $buf = [byte[]]::new($chunkSize)
-        [void]$stream.Read($buf, 0, $chunkSize)
-        $text = [System.Text.Encoding]::UTF8.GetString($buf)
-    } finally {
-        $stream.Dispose()
-    }
-
-    $lines = $text.Split([char]"`n")
-    if ($size -gt $chunkSize -and $lines.Count -gt 0) {
-        $lines = $lines | Select-Object -Skip 1
-    }
-    Log "Parser: file=$($file.Name) size=$size  chunkSize=$chunkSize  lines=$($lines.Count)"
-
-    $lastReqId = $null
-    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-        $line = $lines[$i]
-        if ($line.Length -lt 80) { continue }
-        if (-not $line.Contains('"role":"assistant"')) { continue }
-        if (-not $line.Contains('"type":"text"')) { continue }
-        $m = [regex]::Match($line, '"requestId":"([^"]+)"')
-        if ($m.Success) {
-            $lastReqId = $m.Groups[1].Value
-            break
-        }
-    }
-    if (-not $lastReqId) { Log "Parser: no last-assistant requestId found"; return '' }
-    Log "Parser: last requestId=$lastReqId"
-
-    $sb = [System.Text.StringBuilder]::new()
-    foreach ($line in $lines) {
-        if ($line.Length -lt 80) { continue }
-        if (-not $line.Contains($lastReqId)) { continue }
-        if (-not $line.Contains('"type":"text"')) { continue }
-        if (-not $line.Contains('"role":"assistant"')) { continue }
+    # ---------- Dispatch to adapters; first match wins ----------
+    foreach ($adapter in $script:Adapters) {
+        $matched = $false
         try {
-            $obj = $line | ConvertFrom-Json -ErrorAction Stop
-            if ($obj.message -and $obj.message.content) {
-                foreach ($c in @($obj.message.content)) {
-                    if ($c.type -eq 'text' -and $c.text) {
-                        [void]$sb.Append($c.text)
-                    }
-                }
-            }
-        } catch { }
+            $matched = & $adapter.Match $candidates
+        } catch {
+            Log "Adapter '$($adapter.Name)' Match threw: $_"
+            continue
+        }
+        if (-not $matched) {
+            Log "Adapter no-match for: $($adapter.Name)"
+            continue
+        }
+        Log "Adapter matched: $($adapter.Name)"
+        $file = $null
+        try {
+            $file = & $adapter.FindFocusedSession $candidates $fgTitle $wtTabName
+        } catch {
+            Log "Adapter '$($adapter.Name)' FindFocusedSession threw: $_"
+            continue
+        }
+        if ($file) {
+            return @{ File = $file; Adapter = $adapter }
+        }
+        Log "Adapter '$($adapter.Name)' returned no session file"
     }
-    return $sb.ToString()
+
+    Log "No adapter produced a session file"
+    return $null
 }
 
 # ---------- Main ----------
 
-$session = Find-FocusedSessionFile -projectsRoot $ProjectsRoot
+$pick    = Find-FocusedSession
+$session = $null
+$pickedAdapter = $null
+if ($pick) {
+    $session = $pick.File
+    $pickedAdapter = $pick.Adapter
+}
 
 if (-not $session) {
-    Log "FOCUSED detection failed -- using GLOBAL newest fallback"
+    Log "FOCUSED detection failed -- using GLOBAL newest fallback (Claude projects only)"
     $session = Get-ChildItem -Path $ProjectsRoot -Filter *.jsonl -Recurse -File `
         -ErrorAction SilentlyContinue |
         Where-Object {
@@ -536,13 +419,19 @@ if (-not $session) {
         } |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
-    if ($session) { Log "Global newest: $($session.FullName)" }
+    if ($session) {
+        Log "Global newest: $($session.FullName)"
+        # The global fallback only reaches Claude transcripts, so route the
+        # parse through the claude-code adapter.
+        $pickedAdapter = $script:Adapters | Where-Object { $_.Name -eq 'claude-code' } | Select-Object -First 1
+    }
 }
 
 if (-not $session) { Fail 'No session transcripts found.' }
-Log "PICKED: $($session.FullName)  (mtime $($session.LastWriteTime))"
+if (-not $pickedAdapter) { Fail "Internal: no adapter to parse $($session.Name)" }
+Log "PICKED: $($session.FullName)  (mtime $($session.LastWriteTime))  adapter=$($pickedAdapter.Name)"
 
-$message = Get-LastAssistantTurn -file $session
+$message = & $pickedAdapter.GetLastAssistantTurn $session
 if ([string]::IsNullOrWhiteSpace($message)) {
     Fail "No assistant text in $($session.Name)"
 }
