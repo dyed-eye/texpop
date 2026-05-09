@@ -73,7 +73,7 @@ TriggerPopup(*) {
 
 ActivateLatexPopup(attempt) {
     static MAX_ATTEMPTS := 25  ; ~3 s total
-    title := "LaTeX preview"
+    title := "TeXpop"
     if WinExist(title) {
         try {
             WinActivate(title)

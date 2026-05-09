@@ -556,7 +556,7 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
 '@ -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 350
         for ($i = 0; $i -lt 15; $i++) {
-            $h = [LatexPopupSwp.Win]::FindWindow($null, 'LaTeX preview')
+            $h = [LatexPopupSwp.Win]::FindWindow($null, 'TeXpop')
             if ($h -ne [IntPtr]::Zero) {
                 # SW_SHOW = 5 -- ensure visible & not minimized
                 [LatexPopupSwp.Win]::ShowWindow($h, 5) | Out-Null
