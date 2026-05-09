@@ -23,6 +23,7 @@
 - [How it picks the focused chat](#how-it-picks-the-focused-chat)
 - [Customisation](#customisation)
 - [Adapter coverage](#adapter-coverage)
+- [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 - [Status](#status)
 - [Credits](#credits)
@@ -227,6 +228,20 @@ texpop is built around a `ChatSourceAdapter` interface — each AI CLI gets its 
 | Codex CLI | `adapters/codex.ps1` | Experimental. Best-effort transcript discovery; format may shift between Codex CLI versions. PRs welcome — verify against your installed Codex version and submit fixes. |
 
 Adding a new adapter is a single PowerShell file that exposes `Name`, `Description`, `Match`, `FindFocusedSession`, `GetLastAssistantTurn` and appends itself to `$script:Adapters`. Use `adapters/claude-code.ps1` as the template.
+
+---
+
+## Known limitations
+
+### `/btw` exchanges may not appear
+
+Claude Code's built-in `/btw` slash command does not always persist its question/answer pair to the session JSONL on disk — at least not synchronously. The exchange shows up live in the terminal but may never reach `~/.claude/projects/<encoded>/<sessionid>.jsonl`, or it lands there with significant delay.
+
+texpop reads from disk. If Claude Code hasn't written the `/btw` exchange to the transcript file by the time you press the hotkey, **there is nothing for texpop (or any external tool) to render** — so the popup falls through to the previous on-disk assistant turn.
+
+The adapter does have detection logic for `/btw` and `/aside`: if the most-recent user message in the transcript starts with `/btw` or `/aside`, the popup prefixes the answer with `## /btw` or `## /aside` so the modal nature is visually explicit. That code is dormant until Claude Code starts persisting these exchanges reliably.
+
+This is upstream behavior, not a texpop bug. Track [`anthropics/claude-code`](https://github.com/anthropics/claude-code) for any change in `/btw` persistence semantics.
 
 ---
 
