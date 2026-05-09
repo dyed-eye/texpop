@@ -76,6 +76,188 @@ function Get-ClaudeAiTitle {
     } catch { return $null }
 }
 
+# Read the entire jsonl into a string array of lines, capped at ~maxBytes from
+# the tail. Returns @() on error. Used by the modal-detection helpers below.
+function Read-ClaudeJsonlTail {
+    param([System.IO.FileInfo]$file, [int]$maxBytes = 1500000)
+    try {
+        $size      = $file.Length
+        $chunkSize = [int][Math]::Min($maxBytes, $size)
+        $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+        try {
+            if ($size -gt $chunkSize) {
+                $stream.Seek(-$chunkSize, [System.IO.SeekOrigin]::End) | Out-Null
+            }
+            $buf = [byte[]]::new($chunkSize)
+            [void]$stream.Read($buf, 0, $chunkSize)
+            $text = [System.Text.Encoding]::UTF8.GetString($buf)
+        } finally { $stream.Dispose() }
+        $lines = $text.Split([char]"`n")
+        if ($size -gt $chunkSize -and $lines.Count -gt 0) {
+            # Drop the partial first line.
+            $lines = $lines | Select-Object -Skip 1
+        }
+        return ,$lines
+    } catch {
+        return ,@()
+    }
+}
+
+# Get the timestamp (DateTime?) of the latest assistant *text* turn in $lines.
+# Returns $null if not found.
+function Get-LatestAssistantTextTime {
+    param([string[]]$lines)
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $line = $lines[$i]
+        if (-not $line) { continue }
+        if ($line.Length -lt 80) { continue }
+        if (-not $line.Contains('"role":"assistant"')) { continue }
+        if (-not $line.Contains('"type":"text"')) { continue }
+        $m = [regex]::Match($line, '"timestamp":"([^"]+)"')
+        if ($m.Success) {
+            try { return [DateTime]::Parse($m.Groups[1].Value).ToUniversalTime() } catch { }
+        }
+    }
+    return $null
+}
+
+# Return the most recent ExitPlanMode tool_use line (raw JSON string) that has
+# NOT been resolved by a following tool_result. Returns $null if none active.
+function Get-ActivePlanModeLine {
+    param([string[]]$lines)
+    # Find latest tool_use for ExitPlanMode.
+    $planIdx     = -1
+    $planToolId  = $null
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $line = $lines[$i]
+        if (-not $line) { continue }
+        if (-not $line.Contains('"name":"ExitPlanMode"')) { continue }
+        if (-not $line.Contains('"type":"tool_use"')) { continue }
+        $m = [regex]::Match($line, '"type":"tool_use","id":"([^"]+)","name":"ExitPlanMode"')
+        if ($m.Success) {
+            $planIdx    = $i
+            $planToolId = $m.Groups[1].Value
+            break
+        }
+    }
+    if ($planIdx -lt 0) { return $null }
+
+    # Look forward for a tool_result referencing $planToolId. Any such match
+    # means the plan was resolved (approved/rejected) -- not active.
+    for ($j = $planIdx + 1; $j -lt $lines.Count; $j++) {
+        $line = $lines[$j]
+        if (-not $line) { continue }
+        if ($line.Contains("`"tool_use_id`":`"$planToolId`"")) {
+            return $null
+        }
+    }
+    return $lines[$planIdx]
+}
+
+# Extract the markdown plan body from a tool_use ExitPlanMode line.
+function Get-PlanModeMarkdown {
+    param([string]$line)
+    if (-not $line) { return $null }
+    try {
+        $obj = $line | ConvertFrom-Json -ErrorAction Stop
+    } catch { return $null }
+    if (-not $obj.message -or -not $obj.message.content) { return $null }
+    foreach ($c in @($obj.message.content)) {
+        if ($c.type -eq 'tool_use' -and $c.name -eq 'ExitPlanMode' -and $c.input -and $c.input.plan) {
+            return [string]$c.input.plan
+        }
+    }
+    return $null
+}
+
+# Find the most recent aside_question subagent jsonl whose mtime is newer than
+# the latest assistant text turn in the parent transcript. Returns the
+# [FileInfo] or $null.
+function Find-ActiveAsideSubagent {
+    param([System.IO.FileInfo]$parentFile, [DateTime]$lastAssistantUtc)
+    $sessionDir = [System.IO.Path]::Combine(
+        $parentFile.DirectoryName,
+        [System.IO.Path]::GetFileNameWithoutExtension($parentFile.Name))
+    $subDir = Join-Path $sessionDir 'subagents'
+    if (-not (Test-Path $subDir)) { return $null }
+    $candidates = Get-ChildItem -Path $subDir -Filter 'agent-aside_question-*.jsonl' -File `
+        -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending
+    if (-not $candidates) { return $null }
+    $newest = $candidates | Select-Object -First 1
+    # The subagent file must be newer than the parent's last assistant text
+    # turn -- else the assistant has already moved past the aside.
+    $newestUtc = $newest.LastWriteTimeUtc
+    if ($newestUtc -le $lastAssistantUtc) { return $null }
+    return $newest
+}
+
+# Pull the last assistant text-only turn out of a sidechain subagent jsonl.
+function Get-AsideMarkdown {
+    param([System.IO.FileInfo]$file)
+    $lines = Read-ClaudeJsonlTail -file $file -maxBytes 800000
+    if (-not $lines) { return $null }
+    # Walk backward, collect text from the latest end_turn assistant message.
+    $sb = [System.Text.StringBuilder]::new()
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $line = $lines[$i]
+        if (-not $line) { continue }
+        if ($line.Length -lt 80) { continue }
+        if (-not $line.Contains('"role":"assistant"')) { continue }
+        if (-not $line.Contains('"type":"text"')) { continue }
+        try {
+            $obj = $line | ConvertFrom-Json -ErrorAction Stop
+        } catch { continue }
+        if (-not $obj.message -or -not $obj.message.content) { continue }
+        foreach ($c in @($obj.message.content)) {
+            if ($c.type -eq 'text' -and $c.text) {
+                [void]$sb.Insert(0, $c.text)
+            }
+        }
+        if ($sb.Length -gt 0) { break }
+    }
+    if ($sb.Length -eq 0) { return $null }
+    return $sb.ToString()
+}
+
+# Return @{ kind = 'plan' | 'btw'; markdown = '...' } or $null.
+# Modal detection: if the most-recent significant event in the transcript is an
+# unresolved plan-mode preview OR an /aside (~= /btw) subagent answer that
+# postdates the last assistant text turn, render that instead.
+function Get-ClaudeActiveModalContent {
+    param([System.IO.FileInfo]$file)
+
+    $lines = Read-ClaudeJsonlTail -file $file
+    if (-not $lines -or $lines.Count -eq 0) { return $null }
+
+    $lastAssistantUtc = Get-LatestAssistantTextTime -lines $lines
+    if (-not $lastAssistantUtc) { $lastAssistantUtc = [DateTime]::MinValue }
+
+    # 1. Plan mode -- only consider it active when no tool_result has resolved
+    #    it yet. This is the strongest "modal" signal.
+    $planLine = Get-ActivePlanModeLine -lines $lines
+    if ($planLine) {
+        $planMd = Get-PlanModeMarkdown -line $planLine
+        if ($planMd) {
+            $header  = "## Plan mode active`r`n`r`n> Awaiting your approval`r`n`r`n"
+            return @{ kind = 'plan'; markdown = $header + $planMd }
+        }
+    }
+
+    # 2. /aside (a.k.a. /btw) -- the aside subagent jsonl mtime postdates the
+    #    main transcript's last assistant text turn.
+    $aside = Find-ActiveAsideSubagent -parentFile $file -lastAssistantUtc $lastAssistantUtc
+    if ($aside) {
+        $asideMd = Get-AsideMarkdown -file $aside
+        if ($asideMd) {
+            $header  = "## /aside`r`n`r`n> Side question response`r`n`r`n"
+            return @{ kind = 'btw'; markdown = $header + $asideMd }
+        }
+    }
+
+    return $null
+}
+
 function Normalize-ClaudeTitle {
     param([string]$t)
     if (-not $t) { return '' }
@@ -173,6 +355,19 @@ $claudeFindFocused = {
 
 $claudeGetLastAssistantTurn = {
     param([System.IO.FileInfo]$file)
+
+    # Modal-first: plan-mode preview or /aside answer takes precedence over
+    # the previous full assistant turn. Falls through if neither is active.
+    try {
+        $modal = Get-ClaudeActiveModalContent -file $file
+    } catch {
+        Log "Parser[claude]: modal detect threw: $_"
+        $modal = $null
+    }
+    if ($modal -and $modal.markdown) {
+        Log "Parser[claude]: modal active kind=$($modal.kind)  len=$($modal.markdown.Length)"
+        return $modal.markdown
+    }
 
     $size      = $file.Length
     $chunkSize = [int][Math]::Min(500000, $size)
