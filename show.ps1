@@ -561,6 +561,30 @@ $tpl = Get-Content -Path $template -Raw -Encoding UTF8
 $vendorUri = ([uri]$vendor).AbsoluteUri.TrimEnd('/')
 $assetsDir = Join-Path $scriptDir 'assets'
 $assetsUri = ([uri]$assetsDir).AbsoluteUri.TrimEnd('/')
+
+# Resolve favicon: user override (svg/png/jpg/ico) wins over bundled default.
+$iconCandidates = @(
+    'icon-override.svg',
+    'icon-override.png',
+    'icon-override.jpg',
+    'icon-override.ico',
+    'icon-default.svg'
+)
+$resolvedIcon = $null
+foreach ($name in $iconCandidates) {
+    $path = Join-Path $assetsDir $name
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $resolvedIcon = ([uri]$path).AbsoluteUri
+        Log "Icon resolved: $name -> $resolvedIcon"
+        break
+    }
+}
+if (-not $resolvedIcon) {
+    Log "Icon: no candidate found in $assetsDir (template href will dangle)"
+    $resolvedIcon = "$assetsUri/icon-default.svg"
+}
+
+$tpl = $tpl.Replace('ASSETS_BASE/icon.svg', $resolvedIcon)
 $tpl = $tpl.Replace('VENDOR_BASE', $vendorUri)
 $tpl = $tpl.Replace('ASSETS_BASE', $assetsUri)
 $safeMsg = $message -replace '</script', '<\/script'
