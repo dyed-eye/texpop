@@ -555,8 +555,7 @@ public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, Sys
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern uint GetWindowThreadProcessId(System.IntPtr hwnd, out uint pid);
 
-public static int CloseTeXpopMsedgeWindows(string substr) {
-    int closed = 0;
+public static System.IntPtr[] FindTeXpopMsedgeWindows(string substr) {
     System.Collections.Generic.List<System.IntPtr> targets = new System.Collections.Generic.List<System.IntPtr>();
     EnumWindows((hWnd, lParam) => {
         if (!IsWindowVisible(hWnd)) return true;
@@ -565,10 +564,6 @@ public static int CloseTeXpopMsedgeWindows(string substr) {
         var sb = new System.Text.StringBuilder(len + 1);
         GetWindowText(hWnd, sb, sb.Capacity);
         if (sb.ToString().IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) < 0) return true;
-
-        // Title matches - now verify the owning process is msedge.exe
-        // (don't close Comet / Chrome / a browser tab that happens to show
-        // a github.com/dyed-eye/texpop page).
         uint pid;
         GetWindowThreadProcessId(hWnd, out pid);
         try {
@@ -576,23 +571,32 @@ public static int CloseTeXpopMsedgeWindows(string substr) {
             if (string.Equals(p.ProcessName, "msedge", System.StringComparison.OrdinalIgnoreCase)) {
                 targets.Add(hWnd);
             }
-        } catch { /* process gone */ }
+        } catch { }
         return true;
     }, System.IntPtr.Zero);
+    return targets.ToArray();
+}
+
+public static int CloseTeXpopMsedgeWindows(string substr) {
+    var targets = FindTeXpopMsedgeWindows(substr);
     foreach (var h in targets) {
         // WM_CLOSE = 0x0010
         SendMessage(h, 0x0010, System.IntPtr.Zero, System.IntPtr.Zero);
-        closed++;
     }
-    return closed;
+    return targets.Length;
 }
 '@ -ErrorAction SilentlyContinue
     }
+    # Snapshot existing TeXpop windows BEFORE launch so we can later
+    # distinguish the new popup HWND from any leftover HWNDs that may still
+    # be enumerable while Edge is mid-close.
+    $script:preLaunchHwnds = @()
     try {
+        $script:preLaunchHwnds = [LatexPopupCloser.Win]::FindTeXpopMsedgeWindows('TeXpop')
         $closed = [LatexPopupCloser.Win]::CloseTeXpopMsedgeWindows('TeXpop')
         if ($closed -gt 0) {
             Log "Closed $closed existing TeXpop popup window(s) before relaunch (msedge-only)"
-            Start-Sleep -Milliseconds 150  # give Edge time to actually close
+            Start-Sleep -Milliseconds 250  # give Edge time to actually close
         }
     } catch { Log "Pre-launch close threw: $_" }
 
@@ -662,11 +666,20 @@ public static System.IntPtr FindWindowContaining(string substr) {
         # window title from <title>. Poll up to ~12 s.
         $maxAttempts = 60
         $attemptDelay = 200
+        # Build a hashset of pre-launch HWNDs to exclude (they may be
+        # half-closed but still enumerable for a few hundred ms).
+        $excluded = @{}
+        foreach ($eh in $script:preLaunchHwnds) { $excluded[[int64]$eh] = $true }
+
         for ($i = 0; $i -lt $maxAttempts; $i++) {
-            # Substring match: Edge --app may decorate the title (e.g. add URL).
-            $h = [LatexPopupSwp.Win]::FindWindowContaining('TeXpop')
+            # Find a NEW TeXpop msedge HWND that wasn't in the pre-launch snapshot.
+            $candidates = [LatexPopupCloser.Win]::FindTeXpopMsedgeWindows('TeXpop')
+            $h = [IntPtr]::Zero
+            foreach ($cand in $candidates) {
+                if (-not $excluded.ContainsKey([int64]$cand)) { $h = $cand; break }
+            }
             if ($h -ne [IntPtr]::Zero) {
-                Log "FindWindowContaining matched 'TeXpop' on attempt $($i+1) (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
+                Log "Found NEW TeXpop popup on attempt $($i+1) (HWND=0x$([Convert]::ToString([int64]$h, 16)); pre-launch had $($script:preLaunchHwnds.Count))"
                 # SW_SHOW = 5 -- ensure visible & not minimized
                 [LatexPopupSwp.Win]::ShowWindow($h, 5) | Out-Null
 
