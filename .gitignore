@@ -1,0 +1,35 @@
+# Vendor files are downloaded by setup.ps1 -- do not commit them.
+vendor/
+
+# User's personal icon override (replace assets/icon-default.svg locally to customise)
+assets/dubstepgun.png
+assets/icon-override.*
+
+# Runtime Edge --app profile (created at $LOCALAPPDATA, but if anyone redirects it locally, ignore)
+edge-profile*/
+
+# Debug + diagnostic logs
+*.log
+latex-popup-debug.log
+
+# Backup / archived versions
+*.bak
+*.old
+*.orig
+
+# OS / editor crud
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Temp render output
+latex-popup.html
+latex-popup-test*.html
+latex-popup-test-message.txt
+install-latex-popup-startup.vbs
+
+# Build artifacts (none today, reserved for future)
+dist/
+build/
