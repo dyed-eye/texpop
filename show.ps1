@@ -460,6 +460,7 @@ $iconCandidates = @(
     'icon-override.png',
     'icon-override.jpg',
     'icon-override.ico',
+    'icon-default.ico',
     'icon-default.png',
     'icon-default.svg'
 )
@@ -474,7 +475,7 @@ foreach ($name in $iconCandidates) {
 }
 if (-not $resolvedIcon) {
     Log "Icon: no candidate found in $assetsDir (template href will dangle)"
-    $resolvedIcon = "$assetsUri/icon-default.png"
+    $resolvedIcon = "$assetsUri/icon-default.ico"
 }
 
 $tpl = $tpl.Replace('ASSETS_BASE/icon.svg', $resolvedIcon)
