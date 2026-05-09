@@ -142,6 +142,16 @@ Adding a new adapter is a single PowerShell file that exposes `Name`, `Descripti
 
 ---
 
+## Under development
+
+These are on the roadmap but not shipped:
+
+- **Linux port.** The Windows-only pieces — AHK hotkeys, PEB CWD reads, UIAutomation tab name, Edge `--app` host — all need replacements (`xbindkeys`/`hammerspoon`, `/proc/<pid>/cwd`, X11/Wayland focus APIs, a Chromium app window). Coordinate first via an issue if you want to tackle it.
+- **macOS port.** Similar shape: `skhd`/`Hammerspoon`, `lsof`/`proc_pidinfo`, the macOS Accessibility API, a Safari/Chromium app window. Same "open an issue first" rule.
+- **Codex CLI adapter.** `adapters/codex.ps1` ships experimental, doc-driven. The transcript layout was reverse-engineered from Codex CLI documentation and a couple of community blog posts — not from a parsed real session. PRs welcome from anyone running an actual Codex CLI install who can verify the field shapes and tighten the parser.
+
+---
+
 ## Known limitations
 
 ### `/btw` exchanges may not appear
