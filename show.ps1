@@ -37,8 +37,16 @@ $ErrorActionPreference = 'Stop'
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $template  = Join-Path $scriptDir 'template.html'
 $vendor    = Join-Path $scriptDir 'vendor'
-$outHtml   = Join-Path $env:TEMP 'texpop.html'
+# Each invocation writes to a unique filename so Edge can't serve the previous
+# render from cache. Stale files (>5 min old) are pruned right here at start.
+$invocationId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+$outHtml   = Join-Path $env:TEMP "texpop-$invocationId.html"
 $logPath   = Join-Path $env:TEMP 'texpop-debug.log'
+try {
+    Get-ChildItem -Path $env:TEMP -Filter 'texpop-*.html' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-5) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+} catch { }
 
 if (-not $ProjectsRoot) {
     $ProjectsRoot = Join-Path $env:USERPROFILE '.claude\projects'
@@ -544,8 +552,10 @@ public static extern int GetWindowTextLength(System.IntPtr hWnd);
 public static extern bool IsWindowVisible(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern uint GetWindowThreadProcessId(System.IntPtr hwnd, out uint pid);
 
-public static int CloseAllByTitleSubstring(string substr) {
+public static int CloseTeXpopMsedgeWindows(string substr) {
     int closed = 0;
     System.Collections.Generic.List<System.IntPtr> targets = new System.Collections.Generic.List<System.IntPtr>();
     EnumWindows((hWnd, lParam) => {
@@ -554,9 +564,19 @@ public static int CloseAllByTitleSubstring(string substr) {
         if (len <= 0) return true;
         var sb = new System.Text.StringBuilder(len + 1);
         GetWindowText(hWnd, sb, sb.Capacity);
-        if (sb.ToString().IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) >= 0) {
-            targets.Add(hWnd);
-        }
+        if (sb.ToString().IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) < 0) return true;
+
+        // Title matches - now verify the owning process is msedge.exe
+        // (don't close Comet / Chrome / a browser tab that happens to show
+        // a github.com/dyed-eye/texpop page).
+        uint pid;
+        GetWindowThreadProcessId(hWnd, out pid);
+        try {
+            var p = System.Diagnostics.Process.GetProcessById((int)pid);
+            if (string.Equals(p.ProcessName, "msedge", System.StringComparison.OrdinalIgnoreCase)) {
+                targets.Add(hWnd);
+            }
+        } catch { /* process gone */ }
         return true;
     }, System.IntPtr.Zero);
     foreach (var h in targets) {
@@ -569,9 +589,9 @@ public static int CloseAllByTitleSubstring(string substr) {
 '@ -ErrorAction SilentlyContinue
     }
     try {
-        $closed = [LatexPopupCloser.Win]::CloseAllByTitleSubstring('TeXpop')
+        $closed = [LatexPopupCloser.Win]::CloseTeXpopMsedgeWindows('TeXpop')
         if ($closed -gt 0) {
-            Log "Closed $closed existing TeXpop popup window(s) before relaunch"
+            Log "Closed $closed existing TeXpop popup window(s) before relaunch (msedge-only)"
             Start-Sleep -Milliseconds 150  # give Edge time to actually close
         }
     } catch { Log "Pre-launch close threw: $_" }
