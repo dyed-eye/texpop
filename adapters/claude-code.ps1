@@ -341,18 +341,52 @@ $claudeGetLastAssistantTurn = {
     $turn = $sb.ToString()
     if (-not $turn) { return '' }
 
-    # /aside detection -- text-marker-based. The /aside slash command produces
-    # a regular assistant turn whose text begins with "ASIDE:" (sometimes
-    # wrapped in a Markdown code-fence per the command's example output).
-    $leading = $turn.TrimStart()
-    $fenceMatch = [regex]::Match($leading, '^(?:`{3,}|~{3,})[^\r\n]*\r?\n')
-    if ($fenceMatch.Success) {
-        $leading = $leading.Substring($fenceMatch.Length)
+    # /btw and /aside detection -- look at the user message that PRECEDED this
+    # assistant turn. /btw is a built-in Claude Code slash command; /aside is
+    # a user-installed one. Neither gives the assistant response a recognizable
+    # text prefix, so the only reliable signal is the user message that
+    # triggered it.
+    #
+    # Scan backwards from the line that introduced the last requestId; the
+    # first user message we hit is the prompt we're responding to.
+    $lastUserText = $null
+    $reachedReq   = $false
+    for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+        $line = $lines[$i]
+        if (-not $reachedReq) {
+            if ($line.Contains($lastReqId)) { $reachedReq = $true }
+            continue
+        }
+        if (-not $line.Contains('"type":"user"')) { continue }
+        if (-not $line.Contains('"role":"user"')) { continue }
+        try {
+            $obj = $line | ConvertFrom-Json -ErrorAction Stop
+            if ($obj.type -ne 'user' -or -not $obj.message) { continue }
+            if ($obj.message.role -ne 'user') { continue }
+            $content = $obj.message.content
+            if ($content -is [string]) {
+                $lastUserText = $content
+            } elseif ($content) {
+                foreach ($c in @($content)) {
+                    if ($c.type -eq 'text' -and $c.text) {
+                        $lastUserText = $c.text
+                        break
+                    }
+                }
+            }
+            if ($lastUserText) { break }
+        } catch { }
     }
-    if ($leading -match '^\s*ASIDE\s*:') {
-        Log "Parser[claude]: /aside marker detected  len=$($turn.Length)"
-        $header = "## /aside`r`n`r`n> Side question response`r`n`r`n"
-        return $header + $turn
+
+    if ($lastUserText) {
+        $trimmed = $lastUserText.TrimStart()
+        if ($trimmed -match '^/(btw|aside)\b') {
+            $cmd = $matches[1].ToLower()
+            Log "Parser[claude]: /$cmd slash-command detected from user message"
+            $tag    = if ($cmd -eq 'btw') { 'By the way' } else { 'Side question' }
+            $header = "## /$cmd`r`n`r`n> $tag response`r`n`r`n"
+            return $header + $turn
+        }
     }
 
     return $turn
