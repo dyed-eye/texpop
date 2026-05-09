@@ -359,7 +359,10 @@ function Find-FocusedSession {
 
     Log "Tree walk: $($candidates.Count) descendant process(es) under PID $fgPid"
     foreach ($c in $candidates) {
-        $cmdShort = if ($c.CommandLine) { ($c.CommandLine -replace '\s+', ' ').Substring(0, [Math]::Min(140, $c.CommandLine.Length)) } else { '<no cmd>' }
+        $cmdShort = if ($c.CommandLine) {
+            $collapsed = $c.CommandLine -replace '\s+', ' '
+            if ($collapsed.Length -gt 140) { $collapsed.Substring(0, 140) } else { $collapsed }
+        } else { '<no cmd>' }
         Log "  candidate pid=$($c.ProcessId)  $($c.Name)  cmd='$cmdShort'"
     }
 
