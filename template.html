@@ -266,8 +266,25 @@
         const html = target.innerHTML;
         const dm = html.match(dashHtmlRe);
         if (!dm) return null;
-        const bodyHtml = html.substring(dm.index + dm[0].length);
-        return { label, bodyHtml, container: el };
+        let bodyHtml = html.substring(dm.index + dm[0].length);
+
+        // markdown-it joins consecutive non-blank lines into a single <p>
+        // (with literal \n between them when breaks:false). That means a
+        // closing dash line written DIRECTLY below the opener (no blank
+        // line) lands inside the SAME paragraph as the opener, instead of
+        // becoming its own sibling <p>. Detect that case here so the
+        // callout closes at the embedded marker and any text written AFTER
+        // the close (still in the same source paragraph) flows back out.
+        const embeddedCloseRe = /(?:^|\n)[ \t]*(?:[─━]{3,}|—{3,}|-{3,}|={3,})[ \t]*(?=\n|$)/;
+        const ec = bodyHtml.match(embeddedCloseRe);
+        let afterHtml = "";
+        let selfClosed = false;
+        if (ec) {
+            afterHtml  = bodyHtml.substring(ec.index + ec[0].length).replace(/^\n+/, "");
+            bodyHtml   = bodyHtml.substring(0, ec.index);
+            selfClosed = true;
+        }
+        return { label, bodyHtml, afterHtml, selfClosed, container: el };
     }
 
     function transformCallouts(root) {
@@ -279,7 +296,7 @@
             const parsed = parseLeadingMarker(el);
             if (!parsed) { el = next; continue; }
 
-            const { label, bodyHtml, container } = parsed;
+            const { label, bodyHtml, afterHtml, selfClosed, container } = parsed;
 
             const wrap = document.createElement("div");
             wrap.className = "callout callout-" + label.toLowerCase().replace(/\s+/g, "-");
@@ -298,9 +315,29 @@
                 body.appendChild(firstP);
             }
 
+            // If the opener paragraph already contained an embedded closing
+            // dash line, the callout is fully self-contained in this single
+            // <p>. Don't absorb subsequent siblings — they are outside.
+            // Any post-close text in the same source paragraph is re-emitted
+            // as a new sibling <p> right after the callout.
+            let cursorAfter;
+            if (selfClosed) {
+                stripTrailingDecorations(body);
+                container.replaceWith(wrap);
+                let tailNode = null;
+                if (afterHtml.trim()) {
+                    tailNode = document.createElement("p");
+                    tailNode.innerHTML = afterHtml;
+                    wrap.parentNode.insertBefore(tailNode, wrap.nextSibling);
+                }
+                cursorAfter = tailNode || wrap.nextElementSibling;
+                el = cursorAfter;
+                continue;
+            }
+
             // Walk forward, absorbing siblings until close-of-callout or next opener.
             let cur = next;
-            let cursorAfter = null; // where the main loop resumes after this callout
+            cursorAfter = null; // where the main loop resumes after this callout
             while (cur) {
                 const after = cur.nextElementSibling;
                 if (isClosingMarkerEl(cur)) {
@@ -353,12 +390,20 @@
     // markdown-it's `_..._` italic rule consumes underscores inside math
     // content (e.g. `g_\lambda`, `C_{b,{0}}`, `_0^t`). When that happens,
     // the math gets sliced by inline <em> tags and KaTeX can no longer
-    // find clean delimiters. We swap each math span for a NULL-delimited
+    // find clean delimiters. We swap each math span for a sentinel-delimited
     // placeholder before markdown-it runs, then restore the original
     // delimiters in the rendered HTML so KaTeX auto-render handles them.
+    //
+    // The OPEN/CLOSE sentinels are pure non-whitespace ASCII alphanumerics.
+    // Earlier versions wrapped the index with NUL bytes (\x00...\x00), but
+    // markdown-it's text-normalization step replaces \x00 with U+FFFD
+    // (HTML5 spec compliance). The restore regex then failed to match the
+    // FFFD-bracketed token and the raw "TEXPOPMATH<n>TEXPOPMATH" string
+    // leaked into the DOM. Distinct OPEN vs CLOSE tokens make the digit
+    // run unambiguous without any whitespace dependency.
     const protectedMath = [];
-    const PROTECT_OPEN  = " TEXPOPMATH";
-    const PROTECT_CLOSE = "TEXPOPMATH ";
+    const PROTECT_OPEN  = "zzTEXPOPMATHOPENzz";
+    const PROTECT_CLOSE = "zzTEXPOPMATHCLOSEzz";
     function protect(content, display) {
         const idx = protectedMath.push({ content, display }) - 1;
         return PROTECT_OPEN + idx + PROTECT_CLOSE;
