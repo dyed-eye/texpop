@@ -348,10 +348,59 @@
       breaks: false
     });
 
+    // Protect math from markdown-it.
+    //
+    // markdown-it's `_..._` italic rule consumes underscores inside math
+    // content (e.g. `g_\lambda`, `C_{b,{0}}`, `_0^t`). When that happens,
+    // the math gets sliced by inline <em> tags and KaTeX can no longer
+    // find clean delimiters. We swap each math span for a NULL-delimited
+    // placeholder before markdown-it runs, then restore the original
+    // delimiters in the rendered HTML so KaTeX auto-render handles them.
+    const protectedMath = [];
+    const PROTECT_OPEN  = " TEXPOPMATH";
+    const PROTECT_CLOSE = "TEXPOPMATH ";
+    function protect(content, display) {
+        const idx = protectedMath.push({ content, display }) - 1;
+        return PROTECT_OPEN + idx + PROTECT_CLOSE;
+    }
+    function preprocessProtectingMath(input) {
+        // Split on fenced code blocks and inline backtick code, preserving
+        // them verbatim. We must NOT pre-extract math from inside code,
+        // because `$` is literal there.
+        const segmentRe = /(```[\s\S]*?```|`[^`\n]*`)/g;
+        const parts = input.split(segmentRe);
+        return parts.map(function (p) {
+            if (!p) return p;
+            if (p.startsWith("```")) return p;
+            if (p.startsWith("`") && p.endsWith("`") && p.length > 1) return p;
+            let s = p;
+            // Order matters: $$...$$ first, then bracket variants, then $...$
+            // (otherwise `$$` would be treated as two empty `$...$` blocks).
+            s = s.replace(/\$\$([\s\S]+?)\$\$/g, function (_, m) { return protect(m, true); });
+            s = s.replace(/\\\[([\s\S]+?)\\\]/g, function (_, m) { return protect(m, true); });
+            s = s.replace(/\\\(([\s\S]+?)\\\)/g, function (_, m) { return protect(m, false); });
+            // Inline `$...$`: require non-whitespace right after the opening
+            // `$` and right before the closing `$`. Avoids matching empty
+            // pairs and stray currency-style dollars.
+            s = s.replace(/\$(?!\s)([^\$\n]+?)(?<!\s)\$/g, function (_, m) { return protect(m, false); });
+            return s;
+        }).join("");
+    }
+
     const raw = document.getElementById("msg-data").textContent;
-    const html = md.render(raw);
+    const preprocessed = preprocessProtectingMath(raw);
+    const html = md.render(preprocessed);
+
+    // Restore math markers BEFORE assigning innerHTML so the original
+    // $...$ / $$...$$ delimiters are intact for KaTeX auto-render.
+    const restoreRe = new RegExp(PROTECT_OPEN + "(\\d+)" + PROTECT_CLOSE, "g");
+    const restored = html.replace(restoreRe, function (_, idx) {
+        const m = protectedMath[Number(idx)];
+        return m.display ? "$$" + m.content + "$$" : "$" + m.content + "$";
+    });
+
     const target = document.getElementById("content");
-    target.innerHTML = html;
+    target.innerHTML = restored;
 
     // Transform "* Label ──── body" patterns into styled callouts.
     transformCallouts(target);
