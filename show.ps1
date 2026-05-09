@@ -499,7 +499,7 @@ foreach ($p in $edgeCandidates) {
 
 $fileUri     = ([uri]$outHtml).AbsoluteUri
 # v2 profile dir -- bumping forces a fresh favicon cache after icon change.
-$userDataDir = Join-Path $env:LOCALAPPDATA 'texpop\edge-profile-v2'
+$userDataDir = Join-Path $env:LOCALAPPDATA 'texpop\edge-profile-v3'
 if (-not (Test-Path $userDataDir)) {
     New-Item -ItemType Directory -Force -Path $userDataDir | Out-Null
 }
@@ -553,11 +553,51 @@ public static extern bool SetForegroundWindow(System.IntPtr hWnd);
 public static extern bool BringWindowToTop(System.IntPtr hWnd);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)]
+public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Auto)]
+public static extern System.IntPtr LoadImage(System.IntPtr hInst, string name, uint type, int cx, int cy, uint flags);
+
+public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Auto)]
+public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern int GetWindowTextLength(System.IntPtr hWnd);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+public static System.IntPtr FindWindowContaining(string substr) {
+    System.IntPtr matched = System.IntPtr.Zero;
+    string lastSeen = "";
+    EnumWindows((hWnd, lParam) => {
+        if (!IsWindowVisible(hWnd)) return true;
+        int len = GetWindowTextLength(hWnd);
+        if (len <= 0) return true;
+        var sb = new System.Text.StringBuilder(len + 1);
+        GetWindowText(hWnd, sb, sb.Capacity);
+        string title = sb.ToString();
+        if (title.IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) >= 0) {
+            matched = hWnd;
+            lastSeen = title;
+            return false; // stop enumeration
+        }
+        return true;
+    }, System.IntPtr.Zero);
+    return matched;
+}
 '@ -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 350
-        for ($i = 0; $i -lt 15; $i++) {
-            $h = [LatexPopupSwp.Win]::FindWindow($null, 'TeXpop')
+        # Edge can take several seconds on cold start before it sets the
+        # window title from <title>. Poll up to ~12 s.
+        $maxAttempts = 60
+        $attemptDelay = 200
+        for ($i = 0; $i -lt $maxAttempts; $i++) {
+            # Substring match: Edge --app may decorate the title (e.g. add URL).
+            $h = [LatexPopupSwp.Win]::FindWindowContaining('TeXpop')
             if ($h -ne [IntPtr]::Zero) {
+                Log "FindWindowContaining matched 'TeXpop' on attempt $($i+1) (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
                 # SW_SHOW = 5 -- ensure visible & not minimized
                 [LatexPopupSwp.Win]::ShowWindow($h, 5) | Out-Null
                 # Briefly topmost to lift z-order, then back to normal so it
@@ -569,9 +609,34 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
                 [LatexPopupSwp.Win]::BringWindowToTop($h) | Out-Null
                 [LatexPopupSwp.Win]::SetForegroundWindow($h) | Out-Null
                 Log "Brought Edge popup to foreground (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
+
+                # Force the taskbar icon directly via WM_SETICON.
+                # Edge sets its own icon when the favicon loads, possibly AFTER
+                # this point. To win the race, send WM_SETICON several times
+                # spaced ~600ms apart so the last one beats Edge's favicon-set.
+                try {
+                    $icoPath = Join-Path $scriptDir 'assets\icon-default.ico'
+                    if (Test-Path $icoPath) {
+                        # IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10
+                        $hIcon = [LatexPopupSwp.Win]::LoadImage([IntPtr]::Zero, $icoPath, 1, 256, 256, 0x10)
+                        for ($k = 0; $k -lt 5; $k++) {
+                            # WM_SETICON = 0x0080, ICON_SMALL = 0, ICON_BIG = 1
+                            [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]0, $hIcon) | Out-Null
+                            [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]1, $hIcon) | Out-Null
+                            Start-Sleep -Milliseconds 600
+                        }
+                        Log "Forced taskbar icon via WM_SETICON x5 (hIcon=0x$([Convert]::ToString([int64]$hIcon, 16)))"
+                    } else {
+                        Log "icon-default.ico not found for WM_SETICON"
+                    }
+                } catch { Log "WM_SETICON threw: $_" }
+
                 break
             }
-            Start-Sleep -Milliseconds 130
+            Start-Sleep -Milliseconds $attemptDelay
+        }
+        if ($i -ge $maxAttempts) {
+            Log "FindWindow 'TeXpop' never matched after $maxAttempts attempts ($($maxAttempts*$attemptDelay)ms total)"
         }
     } catch { Log "Foreground promotion threw: $_" }
 } else {
