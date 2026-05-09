@@ -66,7 +66,7 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
 - **Custom callout styling.** Patterns like `* Insight ──── body ────` automatically transform into styled callout cards (Insight, Tip, Note, Warning, Danger, Caution, Error, Key-Takeaway).
 - **Offline by default.** KaTeX 0.16.x and markdown-it 14.x are vendored locally by `setup.ps1`; once installed, texpop never touches the network.
 - **Customisable hotkey.** Edit one line in `texpop.ahk` to rebind to any AutoHotkey v2 combo.
-- **Customisable icon.** Drop `assets/icon-override.{svg,png,jpg,ico}` to replace the default Tokyo-Night `ψ` favicon.
+- **Customisable icon.** Drop `assets/icon-override.{svg,png,jpg,ico}` to replace the default `ϕ`-on-disc favicon.
 - **Customisable window size.** Pass `-Width` / `-Height` to `show.ps1`, or let texpop auto-size to the terminal.
 - **Codex CLI adapter (experimental).** A `ChatSourceAdapter` for Codex CLI ships in `adapters/codex.ps1`. Contributions welcome to harden it.
 - **Diagnostic mode.** `Ctrl + Alt + Shift + V` runs the detection cascade without launching the popup and opens the debug log in Notepad.
@@ -164,9 +164,9 @@ This is upstream behavior, not a texpop bug. Track [`anthropics/claude-code`](ht
 | Hotkey doesn't fire | Your terminal exe isn't in the allowlist | Add it to `TerminalExes` in `texpop.ahk` and reload |
 | Hotkey doesn't fire | The AutoHotkey process was killed | Re-run `texpop.ahk` (or check the `H` tray icon is present) |
 | Wrong session opens | UIA tab title or `aiTitle` mismatch | `Ctrl + Alt + Shift + V` to dump the debug log; check the cascade output in `%TEMP%\texpop-debug.log` |
-| Popup is wrong size or off-screen | Per-monitor DPI v2 unavailable | texpop requires Windows 10 build 1607+ for full DPI correctness; older builds may fall back to logical pixels |
+| Popup is wrong size or off-screen | Per-monitor DPI v2 unavailable | texpop requires Windows 10 build 1703+ for `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`; older builds may fall back to logical pixels |
 | `Edge not found` error | Microsoft Edge is missing | Install Edge (`winget install Microsoft.Edge`); texpop falls back to the default browser if Edge isn't found, but loses window-positioning |
-| Favicon doesn't update after override | Edge cached the old icon | Delete `%LOCALAPPDATA%\texpop\edge-profile-v2` and re-trigger |
+| Favicon doesn't update after override | Edge cached the old icon | Delete `%LOCALAPPDATA%\texpop\edge-profile-v3` (or run `ie4uinit.exe -show` to refresh the Windows IconCache) and re-trigger |
 | `vendor/ missing` error | `setup.ps1` was never run | Run `setup.ps1` to fetch KaTeX and markdown-it |
 | Popup is empty / unstyled | Vendor files corrupted or partial download | Re-run `setup.ps1 -Force` to refetch everything |
 | No math renders | The reply has no math delimiters | Confirm the reply contains `$...$`, `$$...$$`, `\(...\)`, or `\[...\]` |
@@ -186,10 +186,10 @@ Built on the shoulders of:
 - **[KaTeX](https://katex.org/)** — fast math typesetting for the web (MIT).
 - **[markdown-it](https://github.com/markdown-it/markdown-it)** — pluggable Markdown parser (MIT).
 - **[AutoHotkey v2](https://www.autohotkey.com/)** — Windows hotkey + window automation (GPLv2).
-- **[Anthropic](https://www.anthropic.com/)** — for [Claude Code](https://github.com/anthropics/claude-code), the CLI this tool wraps.
+- **[Anthropic](https://www.anthropic.com/)** — for [Claude Code](https://github.com/anthropics/claude-code), whose transcripts texpop reads.
 - **[OpenAI](https://openai.com/)** — for the [Codex CLI](https://github.com/openai/codex), the experimental second adapter target.
 
-The default `ψ` favicon uses the Tokyo-Night palette.
+The default favicon is a hand-traced cursive `ϕ` (varphi) on a Tokyo-Night-blue disc.
 
 ---
 
