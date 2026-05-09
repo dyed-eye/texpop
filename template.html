@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LaTeX preview</title>
+<link rel="icon" type="image/svg+xml" href="ASSETS_BASE/icon-default.svg">
+<link rel="stylesheet" href="VENDOR_BASE/katex/katex.min.css">
+<style>
+  :root {
+    --bg: #1a1b26;
+    --fg: #c0caf5;
+    --muted: #565f89;
+    --accent: #7aa2f7;
+    --code-bg: #16161e;
+    --border: #2a2e42;
+  }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+                 Arial, "Noto Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  #content {
+    padding: 18px 22px 28px;
+    max-width: 100%;
+    word-wrap: break-word;
+  }
+  h1, h2, h3, h4 { color: var(--accent); margin: 1.1em 0 0.4em; line-height: 1.25; }
+  h1 { font-size: 1.4em; }
+  h2 { font-size: 1.25em; }
+  h3 { font-size: 1.1em; }
+  p { margin: 0.5em 0; }
+  ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
+  li { margin: 0.15em 0; }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 0.6em 0;
+    padding: 0.1em 0.9em;
+    color: var(--muted);
+  }
+  hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+  a { color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: "Cascadia Code", "Consolas", "Menlo", monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 10px 12px;
+    border-radius: 5px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+  }
+  pre code { background: transparent; padding: 0; font-size: 0.88em; }
+  .katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; }
+  .katex { font-size: 1.05em; }
+  table { border-collapse: collapse; margin: 0.5em 0; }
+  th, td { border: 1px solid var(--border); padding: 4px 9px; }
+  th { background: var(--code-bg); }
+  #status {
+    position: fixed;
+    bottom: 6px;
+    right: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    pointer-events: none;
+  }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  /* ---------- Callouts (Insight / Note / Tip / Warning / etc.) ---------- */
+  .callout {
+    margin: 18px 0;
+    padding: 14px 20px 16px;
+    border-radius: 10px;
+    background: linear-gradient(135deg,
+                  rgba(122, 162, 247, 0.08),
+                  rgba(187, 154, 247, 0.04) 60%,
+                  rgba(122, 162, 247, 0.02));
+    border: 1px solid rgba(122, 162, 247, 0.20);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22),
+                inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    position: relative;
+  }
+  .callout-label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+    user-select: none;
+  }
+  .callout-label::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px rgba(122, 162, 247, 0.18),
+                0 0 12px rgba(122, 162, 247, 0.55);
+  }
+  .callout-label::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg,
+                  rgba(122, 162, 247, 0.55),
+                  rgba(122, 162, 247, 0.0));
+  }
+  .callout-body { color: var(--fg); }
+  .callout-body > p:first-child { margin-top: 0; }
+  .callout-body > p:last-child  { margin-bottom: 0; }
+
+  /* Type-specific palettes (auto-applied via JS class). */
+  .callout-warning, .callout-caution, .callout-warn {
+    border-color: rgba(247, 187, 108, 0.32);
+    background: linear-gradient(135deg, rgba(247,187,108,0.10), rgba(247,187,108,0.02));
+  }
+  .callout-warning .callout-label,
+  .callout-caution .callout-label,
+  .callout-warn    .callout-label { color: #f7bb6c; }
+  .callout-warning .callout-label::before,
+  .callout-caution .callout-label::before,
+  .callout-warn    .callout-label::before {
+    background: #f7bb6c;
+    box-shadow: 0 0 0 4px rgba(247,187,108,0.20),
+                0 0 12px rgba(247,187,108,0.55);
+  }
+  .callout-warning .callout-label::after,
+  .callout-caution .callout-label::after,
+  .callout-warn    .callout-label::after {
+    background: linear-gradient(90deg, rgba(247,187,108,0.55), transparent);
+  }
+
+  .callout-tip, .callout-note, .callout-key-takeaway {
+    border-color: rgba(158, 206, 106, 0.32);
+    background: linear-gradient(135deg, rgba(158,206,106,0.09), rgba(158,206,106,0.02));
+  }
+  .callout-tip  .callout-label,
+  .callout-note .callout-label,
+  .callout-key-takeaway .callout-label { color: #9ece6a; }
+  .callout-tip  .callout-label::before,
+  .callout-note .callout-label::before,
+  .callout-key-takeaway .callout-label::before {
+    background: #9ece6a;
+    box-shadow: 0 0 0 4px rgba(158,206,106,0.20),
+                0 0 12px rgba(158,206,106,0.55);
+  }
+  .callout-tip  .callout-label::after,
+  .callout-note .callout-label::after,
+  .callout-key-takeaway .callout-label::after {
+    background: linear-gradient(90deg, rgba(158,206,106,0.55), transparent);
+  }
+
+  .callout-danger, .callout-error {
+    border-color: rgba(247, 118, 142, 0.32);
+    background: linear-gradient(135deg, rgba(247,118,142,0.09), rgba(247,118,142,0.02));
+  }
+  .callout-danger .callout-label,
+  .callout-error  .callout-label { color: #f7768e; }
+  .callout-danger .callout-label::before,
+  .callout-error  .callout-label::before {
+    background: #f7768e;
+    box-shadow: 0 0 0 4px rgba(247,118,142,0.22),
+                0 0 12px rgba(247,118,142,0.55);
+  }
+  .callout-danger .callout-label::after,
+  .callout-error  .callout-label::after {
+    background: linear-gradient(90deg, rgba(247,118,142,0.55), transparent);
+  }
+</style>
+</head>
+<body>
+<div id="content">Loading…</div>
+<div id="status">Esc · close</div>
+
+<script id="msg-data" type="text/plain">MESSAGE_PLACEHOLDER</script>
+<script src="VENDOR_BASE/markdown-it.min.js"></script>
+<script src="VENDOR_BASE/katex/katex.min.js"></script>
+<script src="VENDOR_BASE/katex/auto-render.min.js"></script>
+<script>
+  (function () {
+    // Detect `* Label ──── body ────` patterns at the start of a paragraph/list item
+    // and replace with a styled .callout block. Body keeps its inline HTML (bold,
+    // links, code) intact so KaTeX still picks up math inside.
+    // Allow any non-letter decoration before the label: "*", "✶", "✳", "•", whitespace, etc.
+    const labelTextRe = /^[^A-Za-z]*([A-Z][\w \-]{1,27})\s*(?:[─━]{3,}|—{3,}|-{3,}|={3,})\s*(.+)$/s;
+    const dashHtmlRe  = /(?:[─━]{3,}|—{3,}|-{3,}|={3,})\s*/;
+    const dashOnlyRe  = /^[\s─━—=\-]+$/;
+    const tailDashRe  = /[\s]*[─━—=\-]{3,}[\s]*$/;
+
+    function stripTrailingDecorations(node) {
+        // Walk the body from the end, peeling off <hr> elements and trailing
+        // dash-only text. Recurses into trailing elements so dashes nested in
+        // <strong>/<em>/etc. also get cleaned.
+        while (node.lastChild) {
+            const last = node.lastChild;
+            if (last.nodeType === Node.ELEMENT_NODE && last.tagName === "HR") {
+                node.removeChild(last);
+                continue;
+            }
+            if (last.nodeType === Node.TEXT_NODE) {
+                const t = last.textContent;
+                if (dashOnlyRe.test(t)) {
+                    node.removeChild(last);
+                    continue;
+                }
+                const trimmed = t.replace(tailDashRe, "");
+                if (trimmed !== t) {
+                    last.textContent = trimmed;
+                    if (trimmed === "") { node.removeChild(last); continue; }
+                }
+                break;
+            }
+            if (last.nodeType === Node.ELEMENT_NODE) {
+                stripTrailingDecorations(last);
+                if (last.textContent.trim() === "" && last.children.length === 0) {
+                    node.removeChild(last);
+                    continue;
+                }
+                break;
+            }
+            break;
+        }
+    }
+
+    function isClosingMarkerEl(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.tagName === "HR") return true;
+        if (el.tagName === "P" || el.tagName === "DIV") {
+            const t = el.textContent.trim();
+            if (!t) return false;
+            return /^[\s─━—=\-]+$/.test(t) && /[─━—=\-]/.test(t);
+        }
+        return false;
+    }
+
+    function parseLeadingMarker(el) {
+        if (!el || el.nodeType !== 1) return null;
+        let target = el;
+        if ((el.tagName === "UL" || el.tagName === "OL") && el.children.length === 1) {
+            target = el.children[0]; // <li>
+        }
+        if (target.tagName !== "P" && target.tagName !== "LI") return null;
+
+        const text = target.textContent;
+        const m = text.match(labelTextRe);
+        if (!m) return null;
+        const label = m[1].trim();
+        if (label.length < 2) return null;
+
+        const html = target.innerHTML;
+        const dm = html.match(dashHtmlRe);
+        if (!dm) return null;
+        const bodyHtml = html.substring(dm.index + dm[0].length);
+        return { label, bodyHtml, container: el };
+    }
+
+    function transformCallouts(root) {
+        // Top-level scan: find a callout opener, then absorb following siblings
+        // until a closing marker (line of dashes, <hr>) or a new callout opener.
+        let el = root.firstElementChild;
+        while (el) {
+            const next = el.nextElementSibling;
+            const parsed = parseLeadingMarker(el);
+            if (!parsed) { el = next; continue; }
+
+            const { label, bodyHtml, container } = parsed;
+
+            const wrap = document.createElement("div");
+            wrap.className = "callout callout-" + label.toLowerCase().replace(/\s+/g, "-");
+            const lab = document.createElement("div");
+            lab.className = "callout-label";
+            lab.textContent = label;
+            const body = document.createElement("div");
+            body.className = "callout-body";
+            wrap.appendChild(lab);
+            wrap.appendChild(body);
+
+            // First body element: the remainder of the opener paragraph after the marker.
+            if (bodyHtml && bodyHtml.trim()) {
+                const firstP = document.createElement("p");
+                firstP.innerHTML = bodyHtml;
+                body.appendChild(firstP);
+            }
+
+            // Walk forward, absorbing siblings until close-of-callout or next opener.
+            let cur = next;
+            let cursorAfter = null; // where the main loop resumes after this callout
+            while (cur) {
+                const after = cur.nextElementSibling;
+                if (isClosingMarkerEl(cur)) {
+                    cur.remove();
+                    cursorAfter = after;
+                    break;
+                }
+                if (parseLeadingMarker(cur)) {
+                    cursorAfter = cur;       // leave for next iteration
+                    break;
+                }
+                body.appendChild(cur);       // moves cur out of root into body
+                cur = after;
+                cursorAfter = after;
+            }
+            if (cursorAfter === null && cur === null) cursorAfter = null;
+
+            stripTrailingDecorations(body);
+
+            // Replace the original opener container with the assembled callout.
+            container.replaceWith(wrap);
+
+            el = cursorAfter;
+        }
+    }
+
+    const macros = {
+      "\\ket": "\\left|#1\\right\\rangle",
+      "\\bra": "\\left\\langle#1\\right|",
+      "\\braket": "\\left\\langle#1\\right\\rangle",
+      "\\Tr": "\\operatorname{Tr}",
+      "\\tr": "\\operatorname{tr}",
+      "\\dag": "\\dagger",
+      "\\R": "\\mathbb{R}",
+      "\\C": "\\mathbb{C}",
+      "\\Z": "\\mathbb{Z}",
+      "\\N": "\\mathbb{N}",
+      "\\eps": "\\varepsilon"
+    };
+
+    const md = window.markdownit({
+      html: false,
+      linkify: true,
+      typographer: false,
+      breaks: false
+    });
+
+    const raw = document.getElementById("msg-data").textContent;
+    const html = md.render(raw);
+    const target = document.getElementById("content");
+    target.innerHTML = html;
+
+    // Transform "* Label ──── body" patterns into styled callouts.
+    transformCallouts(target);
+
+    try {
+      renderMathInElement(target, {
+        delimiters: [
+          { left: "$$",  right: "$$",  display: true  },
+          { left: "\\[", right: "\\]", display: true  },
+          { left: "$",   right: "$",   display: false },
+          { left: "\\(", right: "\\)", display: false }
+        ],
+        ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+        throwOnError: false,
+        errorColor: "#f7768e",
+        macros: macros,
+        strict: false
+      });
+    } catch (e) {
+      const err = document.createElement("pre");
+      err.style.color = "#f7768e";
+      err.textContent = "KaTeX render error: " + e.message;
+      target.appendChild(err);
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        if (window.chrome && window.chrome.webview) {
+          window.chrome.webview.postMessage("close");
+        } else {
+          window.close();
+        }
+      }
+    });
+  })();
+</script>
+</body>
+</html>

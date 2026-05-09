@@ -10,7 +10,7 @@ edge-profile*/
 
 # Debug + diagnostic logs
 *.log
-latex-popup-debug.log
+texpop-debug.log
 
 # Backup / archived versions
 *.bak
@@ -25,10 +25,10 @@ latex-popup-debug.log
 Thumbs.db
 
 # Temp render output
-latex-popup.html
-latex-popup-test*.html
-latex-popup-test-message.txt
-install-latex-popup-startup.vbs
+texpop.html
+texpop-test*.html
+texpop-test-message.txt
+install-texpop-startup.vbs
 
 # Build artifacts (none today, reserved for future)
 dist/

@@ -8,7 +8,7 @@
 
 **Workspace layout:**
 - **`C:\emae\sandbox\texpop\`** — dev workspace, this becomes the GitHub repo
-- **`C:\Users\bighe\.claude\scripts\latex-popup\`** — your personal install (untouched; AHK keeps pointing here)
+- **`~/.claude/scripts/texpop/`** — your personal install (untouched; AHK keeps pointing here)
 
 When dev is stable, you can either (a) leave the personal install where it is and just publish the sandbox copy, or (b) repoint AHK at the sandbox copy.
 
@@ -20,8 +20,8 @@ When dev is stable, you can either (a) leave the personal install where it is an
 
 Strip everything personal. Generic, swappable, ready for any user.
 
-- Replace hardcoded `C:\Users\bighe\...` with `$env:USERPROFILE` / `$HOME` everywhere
-- Sweep all comments / log strings for "klim", "bighe", or local-machine references
+- Replace hardcoded `C:\Users\<user>\...` with `$env:USERPROFILE` / `$HOME` everywhere
+- Sweep all comments / log strings for personal identifiers or local-machine references
 - Replace `dubstepgun.png` with a clean default favicon (Tokyo-Night `ψ` SVG)
 - Document how users swap in their own icon (drop a file into `assets/`)
 - Make the AHK terminal allowlist configurable via a top-of-script array (already is)
@@ -37,7 +37,7 @@ Make `texpop` agnostic across CLI agents. Extract a `ChatSourceAdapter` interfac
 
 ## Phase 3 — Repo bootstrap
 
-- `git init` in `scripts\latex-popup\`
+- `git init` in `scripts\texpop\`
 - `LICENSE` (MIT, year 2026, copyright the user's GitHub handle)
 - `.gitignore` — exclude `vendor/`, `assets/edge-profile*/`, `%TEMP%` artifacts, debug logs
 - `setup.ps1` already handles vendor download — README will tell users to run it after clone
@@ -73,7 +73,7 @@ GitHub repo topics: `claude-code`, `latex-parser`, `latex-renderer`, `katex`, `m
 
 ## Phase 6 — Verification before push
 
-- Delete `%LOCALAPPDATA%\latex-popup\edge-profile-v2`, run `setup.ps1`, run hotkey twice — fresh-state test
+- Delete `%LOCALAPPDATA%\texpop\edge-profile-v2`, run `setup.ps1`, run hotkey twice — fresh-state test
 - Multi-tab WT: open chat A and B, focus A, hotkey, confirm A renders; switch to B, hotkey, confirm B
 - DPI test: drag terminal between 100% and 200% monitors, verify overlay
 - Run on a clean Windows account or VM if available — catches hardcoded paths
@@ -86,7 +86,7 @@ GitHub repo topics: `claude-code`, `latex-parser`, `latex-renderer`, `katex`, `m
 
 ## Phase 8 — Distribution
 
-- Comment on [`anthropics/claude-code#21433`](https://github.com/anthropics/claude-code/issues/21433) with: *"For terminal-CLI users on Windows, here's a community workaround until native support ships: github.com/<you>/texpop"*
+- Comment on [`anthropics/claude-code#21433`](https://github.com/anthropics/claude-code/issues/21433) with: *"For terminal-CLI users on Windows, here's a community workaround until native support ships: https://github.com/dyed-eye/texpop"*
 - Same comment style on [`#16446`](https://github.com/anthropics/claude-code/issues/16446)
 - Post on `r/ClaudeAI`, `r/PhysicsStudents` with screenshot and 1-paragraph pitch
 - Anthropic Discord `#community-tools` channel
