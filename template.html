@@ -379,9 +379,9 @@
                 }
                 body.appendChild(cur);       // moves cur out of root into body
                 cur = after;
-                cursorAfter = after;
             }
-            if (cursorAfter === null && cur === null) cursorAfter = null;
+            // After the loop, cur === null means we walked off the end of root.
+            if (cur === null) cursorAfter = null;
 
             stripTrailingDecorations(body);
 
@@ -466,10 +466,26 @@
 
     // Restore math markers BEFORE assigning innerHTML so the original
     // $...$ / $$...$$ delimiters are intact for KaTeX auto-render.
+    //
+    // SECURITY: protectedMath[idx].content is RAW transcript text that
+    // markdown-it never sanitised (it was extracted before md.render ran).
+    // Re-injecting it directly into the HTML string would bypass markdown-it's
+    // html:false and create an XSS path: a transcript containing
+    // `$<img src=x onerror=alert(1)>$` would land as a live <img> element.
+    // HTML-escape the content here. KaTeX's auto-render reads textContent of
+    // the matched delimited region, so escaping doesn't break math rendering.
+    function htmlEscape(s) {
+        return s.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+    }
     const restoreRe = new RegExp(PROTECT_OPEN + "(\\d+)" + PROTECT_CLOSE, "g");
     const restored = html.replace(restoreRe, function (_, idx) {
         const m = protectedMath[Number(idx)];
-        return m.display ? "$$" + m.content + "$$" : "$" + m.content + "$";
+        const safe = htmlEscape(m.content);
+        return m.display ? "$$" + safe + "$$" : "$" + safe + "$";
     });
 
     const target = document.getElementById("content");

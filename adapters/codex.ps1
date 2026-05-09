@@ -83,10 +83,11 @@ $codexFindFocused = {
         return $null
     }
 
-    # Filter candidates down to Codex-specific ones, then read each one's CWD.
-    # We don't currently use CWD to scope Codex transcripts (the date-based
-    # rollout layout is not keyed by working directory), but we log it so a
-    # future maintainer can refine the picker if Codex adds project metadata.
+    # Filter candidates down to Codex-specific ones. We don't currently use
+    # CWD to scope Codex transcripts (the date-based rollout layout is not
+    # keyed by working directory). The earlier diagnostic loop that read CWDs
+    # via PEB and discarded them was removed -- it cost one cross-process read
+    # per candidate per hotkey press for no benefit.
     $codexCandidates = @()
     foreach ($c in $candidates) {
         $name = if ($c.Name) { $c.Name.ToLower() } else { '' }
@@ -95,11 +96,7 @@ $codexFindFocused = {
                    (($name -eq 'node.exe') -and ($cmd -match '(?i)\bcodex\b'))
         if ($isCodex) { $codexCandidates += $c }
     }
-    foreach ($c in $codexCandidates) {
-        $cwd = $null
-        try { $cwd = [LatexPopup.Native]::GetProcessCwd([int]$c.ProcessId) } catch { }
-        Log "  codex pid=$($c.ProcessId)  CWD='$cwd'"
-    }
+    Log "Codex candidates: $($codexCandidates.Count)"
 
     # TODO: if Codex starts emitting a 'session_id' or window title we can map
     # back to a rollout file, use $foregroundTitle / $wtTabName here. For now
@@ -116,11 +113,25 @@ $codexFindFocused = {
 $codexGetLastAssistantTurn = {
     param([System.IO.FileInfo]$file)
 
-    # Codex rollout files tend to be small; read the whole thing. If they
-    # ever grow huge we can switch to a tail read like the Claude adapter.
+    # Codex rollout files tend to be small. Above ~2 MB switch to a tail read
+    # so the popup latency stays bounded if a long-running session grows.
+    $maxFull = 2 * 1024 * 1024
     $text = $null
     try {
-        $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        if ($file.Length -le $maxFull) {
+            $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        } else {
+            $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
+            try {
+                $stream.Seek(-$maxFull, [System.IO.SeekOrigin]::End) | Out-Null
+                $buf = [byte[]]::new($maxFull)
+                [void]$stream.Read($buf, 0, $maxFull)
+                $text = [System.Text.Encoding]::UTF8.GetString($buf)
+            } finally { $stream.Dispose() }
+            # Drop the partial first line introduced by the seek.
+            $nl = $text.IndexOf("`n")
+            if ($nl -gt 0) { $text = $text.Substring($nl + 1) }
+        }
     } catch {
         Log "Parser[codex]: read failed: $_"
         return ''

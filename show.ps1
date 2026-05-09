@@ -76,7 +76,12 @@ $script:fgRectAtStart = $null
 function Fail($msg) {
     Log "FAIL: $msg"
     Flush-Log
-    Write-Host "texpop: $msg" -ForegroundColor Red
+    # show.ps1 runs with -WindowStyle Hidden so console output is invisible.
+    # Surface failures via MessageBox; users can also open the debug log.
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+        [System.Windows.Forms.MessageBox]::Show("texpop: $msg`n`nSee log: $logPath", 'texpop', 'OK', 'Error') | Out-Null
+    } catch { }
     if ($KeepOpenOnError) { Read-Host 'Press Enter' }
     exit 1
 }
@@ -257,6 +262,9 @@ public static class Native {
             ushort len = BitConverter.ToUInt16(usBuf, 0);
             IntPtr buf = (IntPtr)BitConverter.ToInt64(usBuf, 8);
             if (len == 0 || buf == IntPtr.Zero) return null;
+            // Clamp to MAX_PATH*2 so a corrupt or adversarial PEB can't trick us
+            // into a 64KB cross-process read.
+            if (len > 520) return null;
 
             byte[] strBytes = new byte[len];
             if (!ReadProcessMemory(hProc, buf, strBytes, len, out br))
@@ -327,15 +335,22 @@ $script:Adapters = @()
 $script:ClaudeProjectsRoot = $ProjectsRoot
 
 $adapterDir = Join-Path $scriptDir 'adapters'
+# Explicit allowlist: an attacker (or a confused git pull) dropping a new .ps1
+# into adapters/ should NOT get auto-executed in this script's scope. To add a
+# new adapter, edit this list and ship the file.
+$adapterAllowlist = @('claude-code.ps1', 'codex.ps1')
 if (Test-Path $adapterDir) {
-    $adapterFiles = Get-ChildItem -Path $adapterDir -Filter '*.ps1' -File `
-        -ErrorAction SilentlyContinue | Sort-Object Name
-    foreach ($af in $adapterFiles) {
+    foreach ($name in $adapterAllowlist) {
+        $afPath = Join-Path $adapterDir $name
+        if (-not (Test-Path -LiteralPath $afPath -PathType Leaf)) {
+            Log "Adapter '$name' not present in $adapterDir -- skipped"
+            continue
+        }
         try {
-            . $af.FullName
-            Log "Loaded adapter file: $($af.Name)"
+            . $afPath
+            Log "Loaded adapter file: $name"
         } catch {
-            Log "Failed to load adapter '$($af.Name)': $_"
+            Log "Failed to load adapter '$name': $_"
         }
     }
 } else {
@@ -355,10 +370,9 @@ function Find-FocusedSession {
     $fgDpi = 96
     try { $fgDpi = [LatexPopup.Native]::GetForegroundDpi() } catch { }
     $script:fgDpiAtStart = $fgDpi
-    $scale = [Math]::Round($fgDpi / 96.0, 2)
     Log "Foreground: HWND=0x$([Convert]::ToString([int64]$fgHwnd, 16))  PID=$fgPid  Title='$fgTitle'"
     Log "Foreground rect (physical px): L=$($script:fgRectAtStart.Left) T=$($script:fgRectAtStart.Top) R=$($script:fgRectAtStart.Right) B=$($script:fgRectAtStart.Bottom)"
-    Log "Foreground monitor DPI=$fgDpi (scale=${scale}x)"
+    Log ("Foreground monitor DPI={0} (scale={1:F2}x)" -f $fgDpi, ($fgDpi / 96.0))
     if ($fgPid -le 0) { Log "Foreground PID 0 -- skipping focus detection"; return $null }
 
     # Get foreground process info
@@ -379,14 +393,22 @@ function Find-FocusedSession {
             if ($termPids) {
                 $termHwnd = [LatexPopup.Native]::FindFirstVisibleHwndForPids([int[]]$termPids)
                 if ($termHwnd -ne [IntPtr]::Zero) {
-                    [void][LatexPopup.Native]::GetWindowThreadProcessId($termHwnd, [ref]$null)
                     $tRect = [LatexPopup.Native]::GetWindowRectPhys($termHwnd)
                     $tTitle = [LatexPopup.Native]::GetWindowTitle($termHwnd)
-                    Log "Re-targeted to terminal HWND=0x$([Convert]::ToString([int64]$termHwnd, 16)) Title='$tTitle' rect=L=$($tRect.Left) T=$($tRect.Top) R=$($tRect.Right) B=$($tRect.Bottom)"
+                    # Pull the terminal's PID so BFS below walks ITS process tree
+                    # instead of the popup's (which has no relevant descendants).
+                    $tPid = [uint32]0
+                    [void][LatexPopup.Native]::GetWindowThreadProcessId($termHwnd, [ref]$tPid)
+                    Log "Re-targeted to terminal HWND=0x$([Convert]::ToString([int64]$termHwnd, 16)) PID=$tPid Title='$tTitle' rect=L=$($tRect.Left) T=$($tRect.Top) R=$($tRect.Right) B=$($tRect.Bottom)"
                     $fgHwnd  = $termHwnd
                     $fgTitle = $tTitle
                     $script:fgRectAtStart = $tRect
-                    $fgPid = 0  # so the WT-UIA branch below is skipped (we don't have a fresh WT pid)
+                    $fgPid = [int]$tPid
+                    # Re-resolve the process name so the WT-UIA branch fires
+                    # iff the re-targeted window is actually Windows Terminal.
+                    try { $fgProc = Get-Process -Id $fgPid -ErrorAction Stop } catch { $fgProc = $null }
+                    $fgName = if ($fgProc) { $fgProc.ProcessName } else { "<unknown>" }
+                    Log "Re-targeted process: $fgName.exe (pid $fgPid)"
                 } else {
                     Log "No visible terminal window found - keeping popup rect (popup will land on top of itself)"
                 }
@@ -422,9 +444,9 @@ function Find-FocusedSession {
         $childMap[$ppid] += $p
     }
 
+    $candidates = [System.Collections.Generic.List[object]]::new()
     $queue = [System.Collections.Generic.Queue[int]]::new()
     $queue.Enqueue($fgPid)
-    $candidates = @()
     $visited = @{}
     while ($queue.Count -gt 0) {
         $cur = $queue.Dequeue()
@@ -433,7 +455,7 @@ function Find-FocusedSession {
         $kids = $childMap[$cur]
         if (-not $kids) { continue }
         foreach ($k in $kids) {
-            $candidates += $k
+            [void]$candidates.Add($k)
             $queue.Enqueue([int]$k.ProcessId)
         }
     }
@@ -447,7 +469,7 @@ function Find-FocusedSession {
         Log "  candidate pid=$($c.ProcessId)  $($c.Name)  cmd='$cmdShort'"
     }
 
-    if (-not $candidates) {
+    if ($candidates.Count -eq 0) {
         Log "No descendant processes of foreground"
         return $null
     }
@@ -562,9 +584,12 @@ if (-not $resolvedIcon) {
 $tpl = $tpl.Replace('ASSETS_BASE/icon.svg', $resolvedIcon)
 $tpl = $tpl.Replace('VENDOR_BASE', $vendorUri)
 $tpl = $tpl.Replace('ASSETS_BASE', $assetsUri)
-$safeMsg = $message -replace '</script', '<\/script'
+# Case-insensitive escape: HTML script-element parsing terminates on </Script,
+# </SCRIPT, etc. so a single case-sensitive replace is insufficient defense.
+$safeMsg = $message -replace '(?i)</script', '<\/script'
 $tpl = $tpl.Replace('MESSAGE_PLACEHOLDER', $safeMsg)
-$srcInfo = "<!-- source: $($session.FullName) | $($session.LastWriteTime) -->`r`n"
+# Source comment: filename + mtime only (full path leaks $env:USERPROFILE).
+$srcInfo = "<!-- source: $($session.Name) | $($session.LastWriteTime) -->`r`n"
 $tpl = $srcInfo + $tpl
 [System.IO.File]::WriteAllText($outHtml, $tpl, [System.Text.UTF8Encoding]::new($false))
 
@@ -579,7 +604,8 @@ foreach ($p in $edgeCandidates) {
 }
 
 $fileUri     = ([uri]$outHtml).AbsoluteUri
-# v2 profile dir -- bumping forces a fresh favicon cache after icon change.
+# Profile dir is versioned; bump the suffix to flush Edge's favicon/state cache
+# when the icon or window-state behaviour changes.
 $userDataDir = Join-Path $env:LOCALAPPDATA 'texpop\edge-profile-v3'
 if (-not (Test-Path $userDataDir)) {
     New-Item -ItemType Directory -Force -Path $userDataDir | Out-Null
@@ -688,9 +714,16 @@ public static int CloseTeXpopMsedgeWindows(string substr) {
     Log "Launched Edge"
 
     try {
+        # Note: this Add-Type registers a SECOND inline type alongside
+        # LatexPopupCloser.Win above. The two share several P/Invoke
+        # declarations (EnumWindows / GetWindowText / IsWindowVisible);
+        # they remain separate because each is gated by an `-as [type]`
+        # check and the AppDomain caches them across re-runs in the same
+        # PowerShell session, so editing the C# here only takes effect
+        # after a fresh process. Do NOT re-add `FindWindowContaining`
+        # here -- the polling loop below uses the Closer's
+        # `FindTeXpopMsedgeWindows` and an exclusion-set instead.
         Add-Type -Namespace LatexPopupSwp -Name Win -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Auto)]
-public static extern System.IntPtr FindWindow(string lpClassName, string lpWindowName);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern bool SetWindowPos(System.IntPtr hWnd, System.IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -703,36 +736,6 @@ public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
 public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
 [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true, CharSet=System.Runtime.InteropServices.CharSet.Auto)]
 public static extern System.IntPtr LoadImage(System.IntPtr hInst, string name, uint type, int cx, int cy, uint flags);
-
-public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
-[System.Runtime.InteropServices.DllImport("user32.dll", CharSet=System.Runtime.InteropServices.CharSet.Auto)]
-public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern int GetWindowTextLength(System.IntPtr hWnd);
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool IsWindowVisible(System.IntPtr hWnd);
-
-public static System.IntPtr FindWindowContaining(string substr) {
-    System.IntPtr matched = System.IntPtr.Zero;
-    string lastSeen = "";
-    EnumWindows((hWnd, lParam) => {
-        if (!IsWindowVisible(hWnd)) return true;
-        int len = GetWindowTextLength(hWnd);
-        if (len <= 0) return true;
-        var sb = new System.Text.StringBuilder(len + 1);
-        GetWindowText(hWnd, sb, sb.Capacity);
-        string title = sb.ToString();
-        if (title.IndexOf(substr, System.StringComparison.OrdinalIgnoreCase) >= 0) {
-            matched = hWnd;
-            lastSeen = title;
-            return false; // stop enumeration
-        }
-        return true;
-    }, System.IntPtr.Zero);
-    return matched;
-}
 '@ -ErrorAction SilentlyContinue
         Start-Sleep -Milliseconds 350
         # Edge can take several seconds on cold start before it sets the
@@ -742,14 +745,14 @@ public static System.IntPtr FindWindowContaining(string substr) {
         # Build a hashset of pre-launch HWNDs to exclude (they may be
         # half-closed but still enumerable for a few hundred ms).
         $excluded = @{}
-        foreach ($eh in $script:preLaunchHwnds) { $excluded[[int64]$eh] = $true }
+        foreach ($eh in $script:preLaunchHwnds) { $excluded[$eh.ToInt64()] = $true }
 
         for ($i = 0; $i -lt $maxAttempts; $i++) {
             # Find a NEW TeXpop msedge HWND that wasn't in the pre-launch snapshot.
             $candidates = [LatexPopupCloser.Win]::FindTeXpopMsedgeWindows('TeXpop')
             $h = [IntPtr]::Zero
             foreach ($cand in $candidates) {
-                if (-not $excluded.ContainsKey([int64]$cand)) { $h = $cand; break }
+                if (-not $excluded.ContainsKey($cand.ToInt64())) { $h = $cand; break }
             }
             if ($h -ne [IntPtr]::Zero) {
                 Log "Found NEW TeXpop popup on attempt $($i+1) (HWND=0x$([Convert]::ToString([int64]$h, 16)); pre-launch had $($script:preLaunchHwnds.Count))"
@@ -781,22 +784,23 @@ public static System.IntPtr FindWindowContaining(string substr) {
                 [LatexPopupSwp.Win]::SetForegroundWindow($h) | Out-Null
                 Log "Brought Edge popup to foreground (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
 
-                # Force the taskbar icon directly via WM_SETICON.
-                # Edge sets its own icon when the favicon loads, possibly AFTER
-                # this point. To win the race, send WM_SETICON several times
-                # spaced ~600ms apart so the last one beats Edge's favicon-set.
+                # Force the taskbar icon directly via WM_SETICON. Edge sets its
+                # own icon when the favicon loads, possibly slightly after we
+                # hit this point; two sends with a small gap is enough to win
+                # that race in practice (was 5x600ms = 3s blocking on every
+                # hotkey press, which the user perceives as latency).
                 try {
                     $icoPath = Join-Path $scriptDir 'assets\icon-default.ico'
                     if (Test-Path $icoPath) {
                         # IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10
                         $hIcon = [LatexPopupSwp.Win]::LoadImage([IntPtr]::Zero, $icoPath, 1, 256, 256, 0x10)
-                        for ($k = 0; $k -lt 5; $k++) {
+                        for ($k = 0; $k -lt 2; $k++) {
                             # WM_SETICON = 0x0080, ICON_SMALL = 0, ICON_BIG = 1
                             [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]0, $hIcon) | Out-Null
                             [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]1, $hIcon) | Out-Null
-                            Start-Sleep -Milliseconds 600
+                            Start-Sleep -Milliseconds 350
                         }
-                        Log "Forced taskbar icon via WM_SETICON x5 (hIcon=0x$([Convert]::ToString([int64]$hIcon, 16)))"
+                        Log "Forced taskbar icon via WM_SETICON x2 (hIcon=0x$([Convert]::ToString([int64]$hIcon, 16)))"
                     } else {
                         Log "icon-default.ico not found for WM_SETICON"
                     }
@@ -807,12 +811,15 @@ public static System.IntPtr FindWindowContaining(string substr) {
             Start-Sleep -Milliseconds $attemptDelay
         }
         if ($i -ge $maxAttempts) {
-            Log "FindWindow 'TeXpop' never matched after $maxAttempts attempts ($($maxAttempts*$attemptDelay)ms total)"
+            Log "TeXpop popup HWND never appeared after $maxAttempts attempts ($($maxAttempts*$attemptDelay)ms total)"
         }
     } catch { Log "Foreground promotion threw: $_" }
 } else {
-    Log "Edge not found; opening with default browser"
-    Start-Process $outHtml | Out-Null
+    # No fallback to default browser: the popup relies on Edge --app for the
+    # frameless overlay + isolated profile. A regular browser tab would be
+    # confusing (no auto-close on Esc) and lands outside the security
+    # boundary the --app profile gives.
+    Fail "Microsoft Edge not found in expected locations. Install Edge or symlink msedge.exe into Program Files\Microsoft\Edge\Application."
 }
 
 Flush-Log

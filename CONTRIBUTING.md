@@ -95,7 +95,7 @@ Add the block alongside the existing `.callout-warning` / `.callout-tip` / `.cal
 
 Most non-trivial PRs touch `adapters/`. Here's the contract every adapter file must fulfil so `show.ps1` can dispatch to it:
 
-1. **Live in `adapters/<name>.ps1`.** `show.ps1` dot-sources every `.ps1` file in that directory in alphabetical order. Pick a name that's a reasonable URL-slug for the agent (`claude-code`, `codex`, `aider`, etc.).
+1. **Live in `adapters/<name>.ps1` AND register the filename in `show.ps1`.** Adapter loading is an explicit allowlist (the `$adapterAllowlist` array near the top of the adapter-loading block in `show.ps1`), not a `*.ps1` glob — this is intentional, so an unrelated `.ps1` dropped into `adapters/` doesn't auto-execute in script scope. Add your filename to the array; load order follows array order. Pick a name that's a reasonable URL-slug for the agent (`claude-code`, `codex`, `aider`, etc.).
 2. **Append a hashtable to `$script:Adapters`** with these keys, all required:
    - `Name` — short string, used in log lines (`adapter=claude-code`).
    - `Description` — one-liner for humans.
@@ -126,7 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File C:\path\to\texpop\show.ps1 -
 
 This skips the Edge launch, runs the full detection pipeline against whichever window was foreground when you pressed Enter (so click into your terminal first, then `alt-tab` back and run the command — the foreground at *invocation* time is what gets inspected). The debug log opens in Notepad. Re-run after each edit. AHK only needs reloading when you change `texpop.ahk` itself.
 
-For `template.html` changes, an even faster loop: render once normally, then just re-open `%TEMP%\texpop.html` in your browser and edit-reload. The Markdown content is baked in at render time, so reusing the existing temp file gives you a real message to test layout against without re-running the whole pipeline.
+For `template.html` changes, an even faster loop: trigger the popup once normally, then grab the resulting `%TEMP%\texpop-<guid>.html` (filename includes a per-invocation 8-char id; pick the most recent) and re-open it in your browser. Edit-reload for layout work. The Markdown content is baked in at render time, so reusing that file gives you a real message to test against without re-running the whole pipeline. Stale files prune themselves after 5 minutes.
 
 ## Common failure modes during development
 

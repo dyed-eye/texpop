@@ -174,7 +174,7 @@ This is upstream behavior, not a texpop bug. Track [`anthropics/claude-code`](ht
 | Hotkey doesn't fire | The AutoHotkey process was killed | Re-run `texpop.ahk` (or check the `H` tray icon is present) |
 | Wrong session opens | UIA tab title or `aiTitle` mismatch | `Ctrl + Alt + Shift + V` to dump the debug log; check the cascade output in `%TEMP%\texpop-debug.log` |
 | Popup is wrong size or off-screen | Per-monitor DPI v2 unavailable | texpop requires Windows 10 build 1703+ for `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`; older builds may fall back to logical pixels |
-| `Edge not found` error | Microsoft Edge is missing | Install Edge (`winget install Microsoft.Edge`); texpop falls back to the default browser if Edge isn't found, but loses window-positioning |
+| `Edge not found` error | Microsoft Edge is missing | Install Edge (`winget install Microsoft.Edge`). texpop requires Edge `--app` mode for the frameless overlay and isolated profile, so this is a hard failure (a generic browser tab would lose `Esc`-to-close and the DPI-correct positioning) |
 | Favicon doesn't update after override | Edge cached the old icon | Delete `%LOCALAPPDATA%\texpop\edge-profile-v3` (or run `ie4uinit.exe -show` to refresh the Windows IconCache) and re-trigger |
 | `vendor/ missing` error | `setup.ps1` was never run | Run `setup.ps1` to fetch KaTeX and markdown-it |
 | Popup is empty / unstyled | Vendor files corrupted or partial download | Re-run `setup.ps1 -Force` to refetch everything |

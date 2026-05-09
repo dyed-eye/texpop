@@ -62,7 +62,8 @@ function Get-ClaudeAiTitle {
 
         $matches = [regex]::Matches($text, '"aiTitle":"((?:[^"\\]|\\.)*)"')
         if ($matches.Count -eq 0 -and $size -gt $chunkSize) {
-            # Try the head of the file too (small chats)
+            # Tail read missed it; try the head too. The aiTitle line is
+            # usually written near the start of long transcripts.
             $stream2 = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
             try {
                 $buf2 = [byte[]]::new([int][Math]::Min(60000, $size))
@@ -214,7 +215,9 @@ $claudeMatch = {
         $name = if ($c.Name) { $c.Name.ToLower() } else { '' }
         $cmd  = if ($c.CommandLine) { $c.CommandLine } else { '' }
         if ($name -eq 'claude.exe') { return $true }
-        if (($name -eq 'node.exe') -and ($cmd -match 'claude')) { return $true }
+        # Word-boundary match so paths like C:\Users\claude\... or scripts
+        # named preclaude.js don't false-positive. Mirror the codex adapter.
+        if (($name -eq 'node.exe') -and ($cmd -match '(?i)\bclaude\b')) { return $true }
     }
     return $false
 }
@@ -232,13 +235,13 @@ $claudeFindFocused = {
         $name = if ($c.Name) { $c.Name.ToLower() } else { '' }
         $cmd  = if ($c.CommandLine) { $c.CommandLine } else { '' }
         $isClaude = ($name -eq 'claude.exe') -or
-                    (($name -eq 'node.exe') -and ($cmd -match 'claude'))
+                    (($name -eq 'node.exe') -and ($cmd -match '(?i)\bclaude\b'))
         if ($isClaude) { $claudeCandidates += $c }
     }
     if (-not $claudeCandidates) { return $null }
 
     # Collect unique project dirs from candidate CWDs.
-    $projectDirs = @()
+    $projectDirs = [System.Collections.Generic.List[string]]::new()
     foreach ($c in $claudeCandidates) {
         $cwd = $null
         try { $cwd = [LatexPopup.Native]::GetProcessCwd([int]$c.ProcessId) } catch { Log "  PEB read pid=$($c.ProcessId) threw: $_" }
@@ -246,7 +249,7 @@ $claudeFindFocused = {
         if (-not $cwd) { continue }
         $pd = Resolve-ClaudeProjectDirForCwd -cwd $cwd -projectsRoot $projectsRoot
         if (-not $pd) { continue }
-        if ($projectDirs -notcontains $pd) { $projectDirs += $pd }
+        if (-not $projectDirs.Contains($pd)) { [void]$projectDirs.Add($pd) }
     }
     Log "Candidate project dirs: $($projectDirs.Count)"
 
@@ -288,10 +291,20 @@ $claudeGetLastAssistantTurn = {
     }
 
     $size      = $file.Length
+    if ($size -le 0) {
+        Log "Parser[claude]: file=$($file.Name) is empty -- nothing to render"
+        return ''
+    }
     $chunkSize = [int][Math]::Min(500000, $size)
+    # Minimum length for a candidate JSONL line. The shortest valid assistant
+    # text line includes type/role/requestId envelope + text content; values
+    # below this are partial / control / noise lines.
+    $MIN_LINE_LEN = 80
     $stream = [System.IO.File]::Open($file.FullName, 'Open', 'Read', 'ReadWrite')
     try {
-        $stream.Seek(-$chunkSize, [System.IO.SeekOrigin]::End) | Out-Null
+        if ($size -gt $chunkSize) {
+            $stream.Seek(-$chunkSize, [System.IO.SeekOrigin]::End) | Out-Null
+        }
         $buf = [byte[]]::new($chunkSize)
         [void]$stream.Read($buf, 0, $chunkSize)
         $text = [System.Text.Encoding]::UTF8.GetString($buf)
@@ -308,7 +321,7 @@ $claudeGetLastAssistantTurn = {
     $lastReqId = $null
     for ($i = $lines.Count - 1; $i -ge 0; $i--) {
         $line = $lines[$i]
-        if ($line.Length -lt 80) { continue }
+        if ($line.Length -lt $MIN_LINE_LEN) { continue }
         if (-not $line.Contains('"role":"assistant"')) { continue }
         if (-not $line.Contains('"type":"text"')) { continue }
         $m = [regex]::Match($line, '"requestId":"([^"]+)"')
@@ -322,7 +335,7 @@ $claudeGetLastAssistantTurn = {
 
     $sb = [System.Text.StringBuilder]::new()
     foreach ($line in $lines) {
-        if ($line.Length -lt 80) { continue }
+        if ($line.Length -lt $MIN_LINE_LEN) { continue }
         if (-not $line.Contains($lastReqId)) { continue }
         if (-not $line.Contains('"type":"text"')) { continue }
         if (-not $line.Contains('"role":"assistant"')) { continue }
