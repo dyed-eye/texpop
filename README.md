@@ -2,7 +2,6 @@
 
 *Hotkey LaTeX popup for Claude Code (and Codex, experimentally) — overlays your terminal, picks the focused chat, renders Markdown + KaTeX.*
 
-<!-- Demo GIF will be added in v0.1.0 release -->
 ![demo](assets/screenshots/demo.gif)
 
 **Press `Ctrl + Alt + V` in any Claude Code terminal session.**
