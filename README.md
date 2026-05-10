@@ -75,6 +75,58 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
 
 ## Install
 
+### Linux
+
+1. **Clone the repo.**
+
+   ```bash
+   git clone https://github.com/dyed-eye/texpop.git ~/.local/share/texpop
+   cd ~/.local/share/texpop
+   ```
+
+2. **Fetch KaTeX and markdown-it.**
+
+   ```bash
+   ./setup-linux.sh
+   ```
+
+3. **Install the native popup backend if your distro does not ship it.**
+
+   Package names vary, but look for Python 3 bindings for Qt 6 WebEngine
+   (`python-pyqt6-webengine`, `python3-pyqt6.qtwebengine`, or similar).
+
+4. **Show the latest local session.**
+
+   ```bash
+   ./show-linux.py --source auto
+   ```
+
+   Use `--source local`, `--source claude`, or `--session /path/to/session.jsonl`
+   when you want deterministic selection.
+   On Hyprland, use `--hyprland-mode floating` to overlay the focused terminal
+   or `--hyprland-mode tiled` to open as a normal tiled window.
+
+5. **Bind a hotkey in your compositor.**
+
+   Hyprland example:
+
+   ```ini
+   bind = CTRL ALT, V, exec, ~/.local/share/texpop/show-linux.py --source auto --hyprland-mode floating
+   bind = CTRL ALT SHIFT, V, exec, ~/.local/share/texpop/show-linux.py --source auto --hyprland-mode tiled
+   ```
+
+   Sway example:
+
+   ```ini
+   bindsym Ctrl+Alt+v exec ~/.local/share/texpop/show-linux.py --source auto
+   ```
+
+On Hyprland, texpop reads the active window geometry and floats the popup over
+the terminal. Sway, GNOME, and KDE can run the same script, but exact Wayland
+placement depends on the compositor and desktop shortcut rules.
+
+### Windows
+
 1. **Install AutoHotkey v2.**
 
    ```powershell
