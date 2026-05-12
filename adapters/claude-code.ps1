@@ -20,7 +20,11 @@
 function Resolve-ClaudeProjectDirForCwd {
     param([string]$cwd, [string]$projectsRoot)
     if (-not $cwd) { return $null }
-    $encoded = $cwd.Replace(':', '-').Replace('\', '-').Replace('.', '-')
+    # Encoding rule (verified by sampling existing project dirs): replace
+    # ':', '\', '.', and '_' with '-'. Case of the drive letter sometimes
+    # round-trips lowercased (e.g. 'c--emae-sandbox-wardrobe-app'), so try
+    # both variants.
+    $encoded = $cwd.Replace(':', '-').Replace('\', '-').Replace('.', '-').Replace('_', '-')
     $candidates = @(
         $encoded,
         ($encoded.Substring(0,1).ToLower() + $encoded.Substring(1))
@@ -207,6 +211,48 @@ function Find-ClaudeSessionByTitle {
     return $null
 }
 
+# Secondary match: compare the normalized foreground title against each
+# candidate's CWD basename. Catches the case where the WT tab name was
+# auto-set by Claude Code (e.g. spinner-stripped 'filament' against a cwd
+# basename of 'huygens_filament'). Returns the newest jsonl in the
+# best-scoring candidate's project dir.
+function Find-ClaudeSessionByCwdBasename {
+    param([string]$targetTitle, $candidatePairs)
+    $norm = Normalize-ClaudeTitle $targetTitle
+    if (-not $norm) { return $null }
+    $titleKey = ($norm -replace '[^a-z0-9]+', '')
+    if (-not $titleKey) { return $null }
+    Log "CWD-basename match: title-key='$titleKey'"
+
+    $bestPair  = $null
+    $bestScore = 0
+    foreach ($p in $candidatePairs) {
+        $leaf = Split-Path $p.Cwd -Leaf
+        if (-not $leaf) { continue }
+        $leafKey = ($leaf.ToLower() -replace '[^a-z0-9]+', '')
+        if (-not $leafKey) { continue }
+        $score = 0
+        if ($leafKey -eq $titleKey)              { $score = 100 }
+        elseif ($leafKey.StartsWith($titleKey))  { $score = 80  }
+        elseif ($leafKey.EndsWith($titleKey))    { $score = 75  }
+        elseif ($leafKey.Contains($titleKey))    { $score = 60  }
+        elseif ($titleKey.Contains($leafKey))    { $score = 50  }
+        Log "  leaf='$leaf' (key='$leafKey') score=$score"
+        if ($score -gt $bestScore) {
+            $bestScore = $score
+            $bestPair  = $p
+        }
+    }
+    if ($bestScore -lt 50 -or $null -eq $bestPair) {
+        Log "CWD-basename match: no candidate scored"
+        return $null
+    }
+    Log "CWD-basename pick: $($bestPair.Cwd) (score $bestScore)"
+    $j = Find-ClaudeNewestJsonl $bestPair.Path
+    if ($j) { Log "  -> $($j.Name)" }
+    return $j
+}
+
 # ---------- Adapter scriptblocks ----------
 
 $claudeMatch = {
@@ -240,8 +286,11 @@ $claudeFindFocused = {
     }
     if (-not $claudeCandidates) { return $null }
 
-    # Collect unique project dirs from candidate CWDs.
-    $projectDirs = [System.Collections.Generic.List[string]]::new()
+    # Collect unique (project-dir, cwd) pairs from candidate CWDs. We keep
+    # the cwd around so the CWD-basename fallback (below) can compare the
+    # WT tab name against directory leaves.
+    $candidatePairs = [System.Collections.Generic.List[object]]::new()
+    $seenPaths      = [System.Collections.Generic.HashSet[string]]::new()
     foreach ($c in $claudeCandidates) {
         $cwd = $null
         try { $cwd = [LatexPopup.Native]::GetProcessCwd([int]$c.ProcessId) } catch { Log "  PEB read pid=$($c.ProcessId) threw: $_" }
@@ -249,17 +298,55 @@ $claudeFindFocused = {
         if (-not $cwd) { continue }
         $pd = Resolve-ClaudeProjectDirForCwd -cwd $cwd -projectsRoot $projectsRoot
         if (-not $pd) { continue }
-        if (-not $projectDirs.Contains($pd)) { [void]$projectDirs.Add($pd) }
+        if ($seenPaths.Add($pd)) {
+            [void]$candidatePairs.Add([pscustomobject]@{ Path = $pd; Cwd = $cwd })
+        }
     }
-    Log "Candidate project dirs: $($projectDirs.Count)"
+    Log "Candidate project dirs: $($candidatePairs.Count)"
 
-    # PRIMARY signal: match the WT/window title against ai-title in candidate jsonls.
+    $projectDirs = [System.Collections.Generic.List[string]]::new()
+    foreach ($p in $candidatePairs) { [void]$projectDirs.Add($p.Path) }
+
+    # Title sources: foreground window title, then WT selected-tab name.
     $titleSources = @()
     if ($foregroundTitle) { $titleSources += $foregroundTitle }
     if ($wtTabName -and ($wtTabName -ne $foregroundTitle)) { $titleSources += $wtTabName }
+
+    # PRIMARY signal: match each title against ai-title in candidate jsonls.
     foreach ($t in $titleSources) {
         $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $projectDirs
         if ($match) { return $match }
+    }
+
+    # SECONDARY signal: WT auto-set title vs CWD basename. Handles tab names
+    # like '* filament' (spinner + project leaf) that the aiTitle path
+    # cannot match because aiTitles are AI-generated descriptions, not
+    # project names.
+    foreach ($t in $titleSources) {
+        $match = Find-ClaudeSessionByCwdBasename -targetTitle $t -candidatePairs $candidatePairs
+        if ($match) { return $match }
+    }
+
+    # Newest-mtime fallback is only safe when the title is informative OR
+    # there is exactly one candidate. With multiple candidates and a
+    # generic foreground title ('Claude Code' default), the newest-mtime
+    # pick tracks whichever session is actively streaming rather than
+    # which tab is focused -- silently showing the wrong conversation is
+    # worse than no popup.
+    $allUninformative = $true
+    foreach ($t in $titleSources) {
+        $n = Normalize-ClaudeTitle $t
+        if ($n -and ($n -ne 'claude code') -and ($n -ne 'claude')) {
+            $allUninformative = $false
+            break
+        }
+    }
+    if ($allUninformative -and $candidatePairs.Count -gt 1) {
+        Log "Foreground title uninformative; $($candidatePairs.Count) candidates -- refusing newest-mtime fallback"
+        # Signal to show.ps1 that we deliberately refused so the global
+        # newest-mtime fallback at the orchestrator level also stays gated.
+        $script:FocusAmbiguous = $true
+        return $null
     }
 
     # Fallback: newest jsonl across candidate project dirs (heuristic).

@@ -73,6 +73,25 @@ Log "ProjectsRoot=$ProjectsRoot  Diagnose=$Diagnose"
 # the popup so it overlaps the terminal window exactly.
 $script:fgRectAtStart = $null
 
+# Set by an adapter when it deliberately refuses to pick a session (e.g.
+# multiple Claude tabs are open and the foreground title is generic so the
+# newest-mtime fallback would silently show the wrong conversation). When
+# this is true, show.ps1 skips its own global newest-mtime fallback too.
+$script:FocusAmbiguous = $false
+
+function Set-AmbiguousFlag {
+    # AHK's TriggerPopup polls this file. When it appears, AHK swaps its
+    # 'Loading last message...' tooltip for the rename hint. The file lives
+    # under %TEMP% so AHK's A_Temp resolves to the same path.
+    try {
+        $flag = Join-Path $env:TEMP 'texpop-ambiguous.flag'
+        Set-Content -Path $flag -Value 'ambiguous' -Encoding ASCII -ErrorAction Stop
+        Log "Wrote ambiguous flag: $flag"
+    } catch {
+        Log "Set-AmbiguousFlag failed: $_"
+    }
+}
+
 function Fail($msg) {
     Log "FAIL: $msg"
     Flush-Log
@@ -516,6 +535,13 @@ if ($pick) {
 }
 
 if (-not $session) {
+    if ($script:FocusAmbiguous) {
+        Log "Focus ambiguous -- writing AHK signal flag, no popup"
+        Set-AmbiguousFlag
+        Flush-Log
+        if ($Diagnose) { Start-Process notepad.exe -ArgumentList $logPath | Out-Null }
+        exit 0
+    }
     Log "FOCUSED detection failed -- using GLOBAL newest fallback (Claude projects only)"
     $session = Get-ChildItem -Path $ProjectsRoot -Filter *.jsonl -Recurse -File `
         -ErrorAction SilentlyContinue |
