@@ -8,7 +8,7 @@
 **The last assistant message renders as Markdown + LaTeX in a window that overlays the terminal exactly.**
 **`Esc` closes. Press the hotkey again to refresh with the latest reply.**
 
-texpop is for the people who ask AI assistants to *derive* things, not just refactor them — students, researchers, anyone whose terminal output contains more `\sum` than `;`. The reasoning is already in your transcript on disk; texpop just renders it where it's legible. It's a **LaTeX parser for Claude Code** (and Codex, experimentally) for Windows Terminal, conhost, WezTerm, and the rest of the post-VS-Code world: KaTeX, focused-chat detection, DPI-correct overlay, fully offline.
+texpop is for the people who ask AI assistants to *derive* things, not just refactor them — students, researchers, anyone whose terminal output contains more `\sum` than `;`. The reasoning is already in your transcript on disk; texpop just renders it where it's legible. It's a **LaTeX parser for Claude Code** (and Codex, experimentally) for Windows Terminal, conhost, WezTerm, Hyprland, Sway, and the rest of the post-VS-Code world: KaTeX, focused-chat detection, DPI-correct overlay, fully offline.
 
 ---
 
@@ -108,6 +108,9 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
 
 5. **Bind a hotkey in your compositor.**
 
+   Linux does not install a global hotkey by itself. Bind the script in your
+   compositor or desktop shortcut settings.
+
    Hyprland example:
 
    ```ini
@@ -122,8 +125,9 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
    ```
 
 On Hyprland, texpop reads the active window geometry and floats the popup over
-the terminal. Sway, GNOME, and KDE can run the same script, but exact Wayland
-placement depends on the compositor and desktop shortcut rules.
+the terminal when `--hyprland-mode floating` is used. Sway, GNOME, and KDE can
+run the same script, but exact Wayland placement depends on the compositor and
+desktop shortcut rules.
 
 ### Windows
 
@@ -159,13 +163,31 @@ placement depends on the compositor and desktop shortcut rules.
 | `Ctrl + Alt + Shift + V` | Any allowlisted terminal | Diagnostic mode — runs detection without launching the popup, opens `%TEMP%\texpop-debug.log` in Notepad |
 | `Esc` | Inside the popup | Close the popup |
 
+On Linux, the first two rows are whatever shortcut you bind in the compositor.
+`Esc` closes the native Qt popup. Browser fallback windows depend on the browser
+and window manager, so use the native Qt backend for reliable close behavior.
+
 Typical workflow: you're chatting with Claude Code about a physics or math problem. Claude replies with `\ket{\psi}`, a `$$\hat{H}\ket{\psi} = E\ket{\psi}$$` display equation, and a `* Insight ────` callout summarising the result. In the terminal, that's raw text. Press `Ctrl + Alt + V` and the same reply pops up rendered — properly typeset math, styled callout, syntax-highlighted code blocks. Read it, hit `Esc`, you're back in the terminal. Ask the next question, hit `Ctrl + Alt + V` again to refresh. The popup window is sized and positioned to overlap the terminal exactly, so your eyes don't have to relocate.
 
 ---
 
 ## How it picks the focused chat
 
-texpop matches the foreground window's chat title against the `aiTitle` recorded in each Claude Code transcript on disk — the session whose stored title matches the active tab wins. Press `Ctrl + Alt + Shift + V` to dump the full detection cascade to `%TEMP%\texpop-debug.log` if it ever picks the wrong chat.
+On Windows, texpop matches the foreground window's chat title against the
+`aiTitle` recorded in each Claude Code transcript on disk — the session whose
+stored title matches the active tab wins. Press `Ctrl + Alt + Shift + V` to dump
+the full detection cascade to `%TEMP%\texpop-debug.log` if it ever picks the
+wrong chat.
+
+On Linux, the current port first tries to resolve the focused session from the
+active Ghostty window, its child shell, and the CLI process's transcript path.
+Codex is resolved from open `~/.codex/sessions/rollout-*.jsonl` handles. Claude
+Code is resolved from open `~/.claude/projects/*.jsonl` handles, or from the
+focused process CWD mapped to Claude's encoded project directory. This works for
+separate Ghostty windows on Hyprland. If the resolver cannot identify the active
+session, texpop falls back to the newest matching `.jsonl` transcript for the
+selected source (`--source local`, `--source claude`, or `--source auto`). Use
+`--session /path/to/session.jsonl` when you need a hard override.
 
 ---
 
@@ -183,14 +205,19 @@ texpop matches the foreground window's chat title against the `aiTitle` recorded
 
 ## Adapter coverage
 
-texpop is built around a `ChatSourceAdapter` interface — each AI CLI gets its own adapter file in `adapters/`. The orchestrator in `show.ps1` walks the foreground process tree, then asks each registered adapter "is this yours?" The first adapter to match owns the rest of the pipeline: pick the focused session file, parse the transcript, return the last assistant message as Markdown.
+On Windows, texpop is built around a `ChatSourceAdapter` interface — each AI CLI gets its own adapter file in `adapters/`. The orchestrator in `show.ps1` walks the foreground process tree, then asks each registered adapter "is this yours?" The first adapter to match owns the rest of the pipeline: pick the focused session file, parse the transcript, return the last assistant message as Markdown.
+
+The Linux port currently keeps Claude/Codex transcript parsing in `show-linux.py`.
+For Hyprland + Ghostty, it resolves the focused Ghostty window to the CLI
+process's active transcript where possible. Other terminal/compositor
+combinations fall back to newest-session selection unless you pass `--session`.
 
 | Adapter | File | Status |
 |---|---|---|
 | Claude Code | `adapters/claude-code.ps1` | Stable, primary target. Reads `~/.claude/projects/<encoded>/*.jsonl`, joins assistant text by `requestId`, matches `aiTitle` against window/tab titles. |
 | Codex CLI | `adapters/codex.ps1` | Experimental. Best-effort transcript discovery; format may shift between Codex CLI versions. PRs welcome — verify against your installed Codex version and submit fixes. |
 
-Adding a new adapter is a single PowerShell file that exposes `Name`, `Description`, `Match`, `FindFocusedSession`, `GetLastAssistantTurn` and appends itself to `$script:Adapters`. Use `adapters/claude-code.ps1` as the template.
+Adding a new Windows adapter is a single PowerShell file that exposes `Name`, `Description`, `Match`, `FindFocusedSession`, `GetLastAssistantTurn` and appends itself to `$script:Adapters`. Use `adapters/claude-code.ps1` as the template.
 
 ---
 
@@ -198,7 +225,10 @@ Adding a new adapter is a single PowerShell file that exposes `Name`, `Descripti
 
 These are on the roadmap but not shipped:
 
-- **Linux port.** The Windows-only pieces — AHK hotkeys, PEB CWD reads, UIAutomation tab name, Edge `--app` host — all need replacements (`xbindkeys`/`hammerspoon`, `/proc/<pid>/cwd`, X11/Wayland focus APIs, a Chromium app window). Coordinate first via an issue if you want to tackle it.
+- **Linux focused-chat detection outside Ghostty.** The Linux port resolves
+  focused Codex and Claude Code sessions for separate Ghostty windows on
+  Hyprland. Other terminals and Ghostty tabs/panes still need terminal-specific
+  focus plumbing.
 - **macOS port.** Similar shape: `skhd`/`Hammerspoon`, `lsof`/`proc_pidinfo`, the macOS Accessibility API, a Safari/Chromium app window. Same "open an issue first" rule.
 - **Codex CLI adapter.** `adapters/codex.ps1` ships experimental, doc-driven. The transcript layout was reverse-engineered from Codex CLI documentation and a couple of community blog posts — not from a parsed real session. PRs welcome from anyone running an actual Codex CLI install who can verify the field shapes and tighten the parser.
 
