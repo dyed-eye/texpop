@@ -13,6 +13,8 @@ from pathlib import Path
 
 TITLE = "TeXpop"
 APP_ID = "texpop"
+_CLAUDE_RE = re.compile(r"(^|[\s/])claude($|[\s/])")
+_CODEX_RE = re.compile(r"(^|[\s/])codex($|[\s/])")
 
 
 def die(message):
@@ -73,7 +75,7 @@ def claude_project_dir_for_cwd(cwd):
     if not cwd:
         return None
     root = claude_projects_root()
-    encoded = cwd.replace(":", "-").replace("\\", "-").replace("/", "-").replace(".", "-")
+    encoded = cwd.replace(":", "-").replace("\\", "-").replace("/", "-").replace(".", "-").replace("_", "-")
     candidates = [encoded]
     if encoded:
         candidates.append(encoded[0].lower() + encoded[1:])
@@ -184,14 +186,14 @@ def is_claude_process(pid, stat):
     if stat["comm"] == "claude":
         return True
     cmdline = proc_cmdline(pid)
-    return bool(re.search(r"(^|[\s/])claude($|[\s/])", cmdline))
+    return bool(_CLAUDE_RE.search(cmdline))
 
 
 def is_codex_process(pid, stat):
     if stat["comm"] == "codex":
         return True
     cmdline = proc_cmdline(pid)
-    return bool(re.search(r"(^|[\s/])codex($|[\s/])", cmdline))
+    return bool(_CODEX_RE.search(cmdline))
 
 
 def focused_roots():
@@ -225,7 +227,10 @@ def focused_claude_session():
                     candidates.append(newest)
     if not candidates:
         return None
-    return max(set(candidates), key=lambda p: p.stat().st_mtime)
+    try:
+        return max(set(candidates), key=lambda p: p.stat().st_mtime)
+    except (OSError, ValueError):
+        return newest_claude_session()
 
 
 def focused_ghostty_shell(active, table):
@@ -374,6 +379,9 @@ def write_html(root, message, session):
         die("MESSAGE_PLACEHOLDER missing from template.html")
     escaped = re.sub(r"</script", "<\\/script", message, flags=re.IGNORECASE)
     html = html.replace("MESSAGE_PLACEHOLDER", escaped)
+    # SECURITY: the '--' -> '- -' replacement prevents a transcript filename
+    # containing '-->' from prematurely closing the HTML source comment.
+    # Do not remove as cosmetic.
     source = session.name.replace("--", "- -")
     html = f"<!-- source: {source} | {time.ctime(session.stat().st_mtime)} -->\n" + html
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".html", prefix="texpop-", delete=False) as f:
@@ -445,7 +453,11 @@ def place_hyprland(pid, rect, mode, before=None):
         return
     if not rect or not shutil.which("hyprctl"):
         return
-    for _ in range(50):
+    # Poll for up to 2s while Hyprland registers the new window.
+    # Worst case is a cold start on a busy compositor; 20 * 0.1s is enough
+    # in practice. If you raise this, also raise the QTimer cap in
+    # poll_hyprland (show_with_qt) to match.
+    for _ in range(20):
         address = find_hyprland_window(pid, before)
         if address and dispatch_hyprland_placement(address, rect):
             return
@@ -477,25 +489,36 @@ def show_with_qt(html_path, rect, hyprland_mode, before_windows=None):
     win.show()
     win.raise_()
     win.activateWindow()
+    timer = None
     if os.environ.get("XDG_CURRENT_DESKTOP", "").lower() == "hyprland":
-        attempts = {"count": 0}
+        attempt_count = 0
+        timer = QTimer()
+        timer.setInterval(100)
 
         def poll_hyprland():
+            nonlocal attempt_count
             if hyprland_mode != "floating" or not rect or not shutil.which("hyprctl"):
+                timer.stop()
                 return
-            attempts["count"] += 1
+            attempt_count += 1
             address = find_hyprland_window(os.getpid(), before_windows)
             if address and dispatch_hyprland_placement(address, rect):
+                timer.stop()
                 return
-            if attempts["count"] < 50:
-                QTimer.singleShot(100, poll_hyprland)
+            if attempt_count >= 20:
+                timer.stop()
 
-        QTimer.singleShot(250, poll_hyprland)
+        timer.timeout.connect(poll_hyprland)
+        QTimer.singleShot(250, timer.start)
     try:
         exit_code = app.exec()
     except RuntimeError as exc:
+        if timer is not None:
+            timer.stop()
         print(f"texpop: Qt popup failed: {exc}", file=sys.stderr)
         return False
+    if timer is not None:
+        timer.stop()
     return exit_code == 0
 
 
@@ -515,8 +538,6 @@ def show_with_browser(html_path, rect, hyprland_mode, before_windows=None):
         if kind == "chromium":
             profile = Path(tempfile.mkdtemp(prefix="texpop-browser-profile-"))
             os.chmod(profile, 0o700)
-            if profile.stat().st_uid != os.getuid():
-                continue
             atexit.register(shutil.rmtree, profile, ignore_errors=True)
             args = [
                 binary,
@@ -552,8 +573,6 @@ def main():
     parser.add_argument("--browser", action="store_true")
     parser.add_argument("--hyprland-mode", choices=("floating", "tiled", "none"), default=os.environ.get("TEXPOP_HYPRLAND_MODE", "floating"))
     args = parser.parse_args()
-    if args.hyprland_mode not in ("floating", "tiled", "none"):
-        die(f"invalid hyprland mode: {args.hyprland_mode}")
 
     root = Path(__file__).resolve().parent
     session, kind = choose_session(args.source, args.session)

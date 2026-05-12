@@ -615,7 +615,11 @@ $tpl = $tpl.Replace('ASSETS_BASE', $assetsUri)
 $safeMsg = $message -replace '(?i)</script', '<\/script'
 $tpl = $tpl.Replace('MESSAGE_PLACEHOLDER', $safeMsg)
 # Source comment: filename + mtime only (full path leaks $env:USERPROFILE).
-$srcInfo = "<!-- source: $($session.Name) | $($session.LastWriteTime) -->`r`n"
+# SECURITY: the '--' -> '- -' replacement prevents a transcript filename
+# containing '-->' from prematurely closing the HTML source comment.
+# Do not remove as cosmetic.
+$safeSourceName = $session.Name.Replace('--', '- -')
+$srcInfo = "<!-- source: $safeSourceName | $($session.LastWriteTime) -->`r`n"
 $tpl = $srcInfo + $tpl
 [System.IO.File]::WriteAllText($outHtml, $tpl, [System.Text.UTF8Encoding]::new($false))
 

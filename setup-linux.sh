@@ -79,22 +79,22 @@ for job in "${jobs[@]}"; do
   url="${job%%|*}"
   dst="${job#*|}"
   leaf="$(basename "$dst")"
+  expected="${hashes[$leaf]:-}"
+  if [[ "$no_verify" -eq 0 && -z "$expected" ]]; then
+    printf 'FATAL: no pinned hash for %s (vendor.lock incomplete)\n' "$leaf" >&2
+    exit 1
+  fi
   if [[ -f "$dst" && "$force" -eq 0 ]]; then
     printf '[%2d/%d] skip  %s\n' "$i" "$total" "$leaf"
   else
     printf '[%2d/%d] fetch %s\n' "$i" "$total" "$leaf"
-    if ! curl -fsSL --max-redirs 3 "$url" -o "$dst"; then
+    if ! curl -fsSL --proto '=https' --max-redirs 3 "$url" -o "$dst"; then
       printf 'Failed: %s\n' "$url" >&2
       failures=$((failures + 1))
       continue
     fi
   fi
   [[ "$no_verify" -eq 1 ]] && continue
-  expected="${hashes[$leaf]:-}"
-  if [[ -z "$expected" ]]; then
-    printf 'No pinned hash for %s\n' "$leaf" >&2
-    continue
-  fi
   actual="$(sha256sum "$dst" | awk '{print toupper($1)}')"
   if [[ "$actual" != "$expected" ]]; then
     printf 'HASH MISMATCH for %s\nexpected: %s\nactual:   %s\n' "$leaf" "$expected" "$actual" >&2

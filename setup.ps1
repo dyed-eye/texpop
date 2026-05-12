@@ -82,6 +82,10 @@ $failures = 0
 foreach ($j in $jobs) {
     $i++
     $leaf = Split-Path $j.dst -Leaf
+    $expected = $expectedHashes[$leaf]
+    if (-not $NoVerifyHashes -and -not $expected) {
+        throw ("FATAL: no pinned hash for {0} (vendor.lock incomplete)" -f $leaf)
+    }
     if ((Test-Path $j.dst) -and -not $Force) {
         Write-Host ("[{0,2}/{1}] skip  {2}" -f $i, $total, $leaf)
     } else {
@@ -95,11 +99,6 @@ foreach ($j in $jobs) {
         }
     }
     if ($NoVerifyHashes) { continue }
-    $expected = $expectedHashes[$leaf]
-    if (-not $expected) {
-        Write-Warning ("No pinned hash for '{0}' -- skipping verification (update `$expectedHashes if you trust this file)" -f $leaf)
-        continue
-    }
     if (-not (Test-Path $j.dst)) { continue }
     $actual = (Get-FileHash -Path $j.dst -Algorithm SHA256).Hash
     if ($actual -ne $expected) {
