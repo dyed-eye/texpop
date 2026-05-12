@@ -33,3 +33,7 @@ install-texpop-startup.vbs
 # Build artifacts (none today, reserved for future)
 dist/
 build/
+
+# Local-only working notes for Claude Code sessions
+CLAUDE.md
+handoff.md
