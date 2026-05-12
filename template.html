@@ -59,6 +59,35 @@
     border: 1px solid var(--border);
   }
   pre code { background: transparent; padding: 0; font-size: 0.88em; }
+  .code-wrap { position: relative; margin: 0.5em 0; }
+  .code-wrap > pre { margin: 0; }
+  .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    user-select: none;
+    transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+  }
+  .copy-btn:hover { color: var(--accent); background: #232844; border-color: var(--accent); }
+  .copy-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .copy-btn svg { width: 14px; height: 14px; pointer-events: none; }
+  .copy-btn.copied {
+    color: #9ece6a;
+    border-color: #9ece6a;
+    background: #1f2a1d;
+  }
   .katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; }
   .katex { font-size: 1.05em; }
   table { border-collapse: collapse; margin: 0.5em 0; }
@@ -514,6 +543,70 @@
       err.textContent = "KaTeX render error: " + e.message;
       target.appendChild(err);
     }
+
+    // Attach a copy-to-clipboard button to every fenced code block.
+    // markdown-it renders ``` blocks as <pre><code>...</code></pre>;
+    // we skip <pre> elements that contain no <code> (e.g. the KaTeX
+    // error block above).
+    const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+    const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12 10 17 19 7"/></svg>';
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      // file:// fallback when the async Clipboard API is unavailable.
+      return new Promise(function (resolve, reject) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "0";
+        ta.style.left = "0";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          const ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          ok ? resolve() : reject(new Error("execCommand failed"));
+        } catch (err) {
+          document.body.removeChild(ta);
+          reject(err);
+        }
+      });
+    }
+    target.querySelectorAll("pre").forEach(function (pre) {
+      const code = pre.querySelector("code");
+      if (!code) return;
+      // Wrap <pre> in a non-scrolling positioned container so the
+      // copy button stays anchored to the visible rect when the user
+      // scrolls horizontally inside a long-line code block.
+      const wrap = document.createElement("div");
+      wrap.className = "code-wrap";
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "copy-btn";
+      btn.title = "Copy";
+      btn.setAttribute("aria-label", "Copy code");
+      btn.innerHTML = COPY_SVG;
+      btn.addEventListener("click", function () {
+        copyText(code.textContent).then(function () {
+          btn.classList.add("copied");
+          btn.innerHTML = CHECK_SVG;
+          btn.setAttribute("aria-label", "Copied");
+          setTimeout(function () {
+            btn.classList.remove("copied");
+            btn.innerHTML = COPY_SVG;
+            btn.setAttribute("aria-label", "Copy code");
+          }, 1100);
+        }).catch(function () {
+          btn.title = "Copy failed";
+        });
+      });
+      wrap.appendChild(btn);
+    });
 
     document.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
