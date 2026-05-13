@@ -63,13 +63,13 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
 - **KaTeX rendering.** Inline `$...$`, display `$$...$$`, and `\(...\)` / `\[...\]` delimiters all render. Pre-loaded macros for Dirac notation (`\ket`, `\bra`, `\braket`), `\Tr`, blackboard sets (`\R`, `\C`, `\Z`, `\N`), and `\eps`.
 - **Full Markdown.** Headings, lists, tables, blockquotes, fenced code blocks — markdown-it 14.x renders the lot, with math interleaved naturally.
 - **Custom callout styling.** Patterns like `* Insight ──── body ────` automatically transform into styled callout cards (Insight, Tip, Note, Warning, Danger, Caution, Error, Key-Takeaway).
-- **Offline by default.** KaTeX 0.16.x and markdown-it 14.x are vendored locally by `setup.ps1`; once installed, texpop never touches the network.
-- **Customisable hotkey.** Edit one line in `texpop.ahk` to rebind to any AutoHotkey v2 combo.
+- **Offline by default.** KaTeX 0.16.x and markdown-it 14.x are vendored locally by `setup.ps1` / `setup-linux.sh` and pinned by SHA-256 in `vendor.lock`; once installed, texpop never touches the network.
+- **Customisable hotkey.** Edit one line in `texpop.ahk` (Windows) or your compositor config (Linux) to rebind to any combo.
 - **Customisable icon.** Drop `assets/icon-override.{svg,png,jpg,ico}` to replace the default `ϕ`-on-disc favicon.
 - **Customisable window size.** Pass `-Width` / `-Height` to `show.ps1`, or let texpop auto-size to the terminal.
 - **Codex CLI adapter (experimental).** A `ChatSourceAdapter` for Codex CLI ships in `adapters/codex.ps1`. Contributions welcome to harden it.
-- **Diagnostic mode.** `Ctrl + Alt + Shift + V` runs the detection cascade without launching the popup and opens the debug log in Notepad.
-- **MIT licensed.** Personal-scratch project, but yours to fork, ship, and modify. Windows 10/11 supported.
+- **Diagnostic mode.** `Ctrl + Alt + Shift + V` (Windows) or `TEXPOP_DEBUG=1` (Linux) surfaces the detection cascade for troubleshooting.
+- **MIT licensed.** Personal-scratch project, but yours to fork, ship, and modify. Windows 10/11 and Linux (tested on Hyprland + Ghostty) supported.
 
 ---
 
@@ -269,7 +269,7 @@ This is upstream behavior, not a texpop bug. Track [`anthropics/claude-code`](ht
 
 ## Status
 
-Personal-scratch project, MIT licensed. No support guarantees, no roadmap commitments, no SLA — texpop scratches my own itch and I'm publishing it because the same itch keeps showing up in `anthropics/claude-code` issues. PRs are welcome for: new terminal exes, new `ChatSourceAdapter` implementations, new callout palettes, bugfixes, and documentation. Out of scope: VS Code integration (use `claude-code-katex` instead), web-mode rendering (use a Tampermonkey script), and large feature additions that drift from "render the focused chat's last reply, fast." If you want something bigger, fork it.
+Personal-scratch project, MIT licensed. No support guarantees, no roadmap commitments, no SLA — texpop scratches my own itch and I'm publishing it because the same itch keeps showing up in `anthropics/claude-code` issues. Cross-platform as of v0.2.0: Windows is the primary author target, Linux/Hyprland is community-maintained ([@grechman](https://github.com/grechman)). PRs welcome for: new terminal exes, new `ChatSourceAdapter` implementations, new callout palettes, bugfixes, documentation, and additional compositor support (Sway, KDE, GNOME). Out of scope: VS Code integration (use `claude-code-katex` instead), web-mode rendering (use a Tampermonkey script), and large feature additions that drift from "render the focused chat's last reply, fast." If you want something bigger, fork it.
 
 ---
 
