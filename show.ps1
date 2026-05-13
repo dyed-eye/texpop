@@ -581,16 +581,20 @@ if (-not $resolvedIcon) {
     $resolvedIcon = "$assetsUri/icon-default.ico"
 }
 
+# Replacement order is load-bearing: ASSETS_BASE/icon.svg must run BEFORE
+# the bare ASSETS_BASE prefix or the icon URI gets sliced. Same constraint
+# is replicated in show-linux.py:write_html; keep them in sync.
 $tpl = $tpl.Replace('ASSETS_BASE/icon.svg', $resolvedIcon)
 $tpl = $tpl.Replace('VENDOR_BASE', $vendorUri)
 $tpl = $tpl.Replace('ASSETS_BASE', $assetsUri)
-# Case-insensitive escape: HTML script-element parsing terminates on </Script,
-# </SCRIPT, etc. so a single case-sensitive replace is insufficient defense.
-$safeMsg = $message -replace '(?i)</script', '<\/script'
-$tpl = $tpl.Replace('MESSAGE_PLACEHOLDER', $safeMsg)
-# Source comment: filename + mtime only (full path leaks $env:USERPROFILE).
-$srcInfo = "<!-- source: $($session.Name) | $($session.LastWriteTime) -->`r`n"
-$tpl = $srcInfo + $tpl
+# JSON data island: template.html uses <script type='application/json'> for
+# the message payload and parses via JSON.parse. We produce a JSON-encoded
+# string, then defensively escape any </ as <\/ so that no literal '</script'
+# substring inside the message body can terminate the host script element.
+# JSON treats '\/' as identical to '/' on decode, so the message round-trips.
+$jsonMsg = ConvertTo-Json -InputObject $message -Compress
+$jsonMsg = $jsonMsg -replace '</', '<\/'
+$tpl = $tpl.Replace('MESSAGE_PLACEHOLDER', $jsonMsg)
 [System.IO.File]::WriteAllText($outHtml, $tpl, [System.Text.UTF8Encoding]::new($false))
 
 $edge = $null

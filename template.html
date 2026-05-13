@@ -188,7 +188,7 @@
 <div id="content">Loading…</div>
 <div id="status">Esc · close</div>
 
-<script id="msg-data" type="text/plain">MESSAGE_PLACEHOLDER</script>
+<script id="msg-data" type="application/json">MESSAGE_PLACEHOLDER</script>
 <script src="VENDOR_BASE/markdown-it.min.js"></script>
 <script src="VENDOR_BASE/katex/katex.min.js"></script>
 <script src="VENDOR_BASE/katex/auto-render.min.js"></script>
@@ -413,6 +413,23 @@
       breaks: false
     });
 
+    // Strict link validator: reject anything that is not http(s):/mailto:/relative.
+    // markdown-it's default already blocks javascript:/vbscript:/file:/data: (with
+    // a narrow exception for data:image/{gif,png,jpeg,webp}). We tighten further:
+    // the popup is offline-only; there is no legitimate reason for a transcript
+    // link to use data: or file: schemes.
+    const SAFE_SCHEME = /^(https?:|mailto:)/i;
+    md.validateLink = function (url) {
+        if (!url) return false;
+        const trimmed = String(url).trim();
+        if (!trimmed) return false;
+        // Allow scheme-relative ("//host/...") and same-document ("#frag") and
+        // relative ("./path") URIs unchanged.
+        if (trimmed[0] === "#" || trimmed[0] === "/" || trimmed[0] === "?") return true;
+        if (trimmed.indexOf(":") === -1) return true;
+        return SAFE_SCHEME.test(trimmed);
+    };
+
     // Protect math from markdown-it.
     //
     // markdown-it's `_..._` italic rule consumes underscores inside math
@@ -460,7 +477,19 @@
         }).join("");
     }
 
-    const raw = document.getElementById("msg-data").textContent;
+    // The data island is JSON-encoded by the producer (show-linux.py / show.ps1).
+    // Parsing via JSON.parse eliminates the </script-injection class entirely:
+    // any "</script" inside the string is delivered as the escaped sequence
+    // "<\/script" by the producer, which JSON treats as a literal "/" and the
+    // HTML parser sees no premature close tag.
+    let raw;
+    try {
+        raw = JSON.parse(document.getElementById("msg-data").textContent);
+    } catch (e) {
+        document.getElementById("content").textContent = "texpop: failed to parse message JSON (" + e.message + ")";
+        return;
+    }
+    if (typeof raw !== "string") raw = String(raw == null ? "" : raw);
     const preprocessed = preprocessProtectingMath(raw);
     const html = md.render(preprocessed);
 

@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""show-linux.py - Render the focused AI CLI session's last assistant turn.
+
+Linux counterpart of show.ps1. Hyprland + Ghostty is the tested combination;
+other compositors fall back to whichever Chromium-family browser is on PATH.
+"""
+from __future__ import annotations
+
 import argparse
 import atexit
 import json
@@ -9,18 +16,39 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterable, Iterator
 from pathlib import Path
+from typing import Any, NoReturn
 
+# TITLE and APP_ID are part of a cross-layer protocol: they must match
+# template.html's <title> AND show.ps1's "TeXpop" substring filter. Renaming
+# in one place silently breaks popup-close-before-relaunch behaviour.
 TITLE = "TeXpop"
 APP_ID = "texpop"
 
+_VALID_HYPRLAND_MODES = ("floating", "tiled", "none")
 
-def die(message):
+
+def die(message: str) -> NoReturn:
     print(f"texpop: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
-def read_jsonl_tail(path, max_bytes=2 * 1024 * 1024):
+def _debug(message: str) -> None:
+    if os.environ.get("TEXPOP_DEBUG"):
+        print(f"texpop[debug]: {message}", file=sys.stderr)
+
+
+def _mtime_or_zero(path: Path) -> float:
+    """stat() guarded against TOCTOU: a session file deleted between
+    enumeration and the max() sort key would otherwise raise FileNotFoundError."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def read_jsonl_tail(path: Path, max_bytes: int = 2 * 1024 * 1024) -> list[str]:
     size = path.stat().st_size
     with path.open("rb") as f:
         if size > max_bytes:
@@ -30,7 +58,7 @@ def read_jsonl_tail(path, max_bytes=2 * 1024 * 1024):
     return data.decode("utf-8", "replace").splitlines()
 
 
-def local_sessions_root():
+def local_sessions_root() -> Path:
     explicit = os.environ.get("TEXPOP_LOCAL_SESSIONS")
     if explicit:
         return Path(explicit).expanduser()
@@ -40,36 +68,44 @@ def local_sessions_root():
     return Path.home() / ".codex" / "sessions"
 
 
-def newest_file(root, pattern):
+def newest_file(root: Path, pattern: str) -> Path | None:
     if not root.exists():
         return None
     files = [p for p in root.rglob(pattern) if p.is_file()]
     if not files:
         return None
-    return max(files, key=lambda p: p.stat().st_mtime)
+    return max(files, key=_mtime_or_zero)
 
 
-def newest_local_session():
+def newest_local_session() -> Path | None:
     return newest_file(local_sessions_root(), "rollout-*.jsonl")
 
 
-def claude_projects_root():
+def claude_projects_root() -> Path:
     return Path(os.environ.get("CLAUDE_PROJECTS_ROOT", Path.home() / ".claude" / "projects")).expanduser()
 
 
-def newest_claude_session(root=None):
-    root = root or claude_projects_root()
-    files = []
+def newest_claude_session(root: Path | None = None) -> Path | None:
+    if root is None:
+        root = claude_projects_root()
+    files: list[Path] = []
     if root.exists():
         for p in root.rglob("*.jsonl"):
             if "subagents" not in p.parts and ".backups" not in p.parts:
                 files.append(p)
     if not files:
         return None
-    return max(files, key=lambda p: p.stat().st_mtime)
+    return max(files, key=_mtime_or_zero)
 
 
-def claude_project_dir_for_cwd(cwd):
+def claude_project_dir_for_cwd(cwd: str | None) -> Path | None:
+    """Map a CWD to the Claude project directory name Claude Code uses.
+
+    Claude encodes the full CWD as the project dir name by replacing path
+    separators and dots with '-'. The replace of ':' and '\\' is a no-op on
+    Linux CWDs but kept so the encoding rule matches Windows' show.ps1
+    (adapters/claude-code.ps1:Resolve-ClaudeProjectDirForCwd) byte-for-byte.
+    """
     if not cwd:
         return None
     root = claude_projects_root()
@@ -84,7 +120,7 @@ def claude_project_dir_for_cwd(cwd):
     return None
 
 
-def proc_stat(pid):
+def proc_stat(pid: int) -> dict[str, Any] | None:
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
     except OSError:
@@ -105,8 +141,8 @@ def proc_stat(pid):
         return None
 
 
-def proc_table():
-    out = {}
+def proc_table() -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
     for entry in Path("/proc").iterdir():
         if entry.name.isdigit():
             stat = proc_stat(int(entry.name))
@@ -115,7 +151,7 @@ def proc_table():
     return out
 
 
-def proc_cmdline(pid):
+def proc_cmdline(pid: int) -> str:
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
@@ -123,19 +159,19 @@ def proc_cmdline(pid):
     return raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
 
 
-def proc_cwd(pid):
+def proc_cwd(pid: int) -> str | None:
     try:
         return os.readlink(f"/proc/{pid}/cwd")
     except OSError:
         return None
 
 
-def descendants(root_pid, table):
-    children = {}
+def descendants(root_pid: int, table: dict[int, dict[str, Any]]) -> list[int]:
+    children: dict[int, list[int]] = {}
     for stat in table.values():
         children.setdefault(stat["ppid"], []).append(stat["pid"])
     stack = list(children.get(root_pid, []))
-    out = []
+    out: list[int] = []
     while stack:
         pid = stack.pop()
         out.append(pid)
@@ -143,33 +179,37 @@ def descendants(root_pid, table):
     return out
 
 
-def hyprland_clients():
+def hyprland_clients() -> list[dict[str, Any]]:
     if not shutil.which("hyprctl"):
         return []
     data = run_json(["hyprctl", "-j", "clients"])
     return data if isinstance(data, list) else []
 
 
-def active_hyprland_window():
+def active_hyprland_window() -> dict[str, Any] | None:
     if not shutil.which("hyprctl"):
         return None
     data = run_json(["hyprctl", "-j", "activewindow"])
     return data if isinstance(data, dict) and data.get("mapped") else None
 
 
-def session_fds_for_pid(pid, home_part, name_prefix=None):
+def session_fds_for_pid(pid: int, required_dir_part: str, name_prefix: str | None = None) -> list[Path]:
+    """List jsonl files referenced by /proc/<pid>/fd whose path contains the
+    named directory component. required_dir_part must be an exact single path
+    component (e.g. '.claude', '.codex') - substring or multi-component values
+    will not match."""
     fd_dir = Path(f"/proc/{pid}/fd")
-    sessions = []
+    sessions: list[Path] = []
     try:
         fds = list(fd_dir.iterdir())
     except OSError:
         return sessions
     for fd in fds:
         try:
-            target = Path(os.readlink(fd))
+            target = fd.readlink()
         except OSError:
             continue
-        if target.suffix != ".jsonl" or home_part not in target.parts:
+        if target.suffix != ".jsonl" or required_dir_part not in target.parts:
             continue
         if name_prefix and not target.name.startswith(name_prefix):
             continue
@@ -180,21 +220,21 @@ def session_fds_for_pid(pid, home_part, name_prefix=None):
     return sessions
 
 
-def is_claude_process(pid, stat):
+def is_claude_process(pid: int, stat: dict[str, Any]) -> bool:
     if stat["comm"] == "claude":
         return True
     cmdline = proc_cmdline(pid)
     return bool(re.search(r"(^|[\s/])claude($|[\s/])", cmdline))
 
 
-def is_codex_process(pid, stat):
+def is_codex_process(pid: int, stat: dict[str, Any]) -> bool:
     if stat["comm"] == "codex":
         return True
     cmdline = proc_cmdline(pid)
     return bool(re.search(r"(^|[\s/])codex($|[\s/])", cmdline))
 
 
-def focused_roots():
+def focused_roots() -> tuple[list[int], dict[int, dict[str, Any]]]:
     active = active_hyprland_window()
     if not active:
         return [], {}
@@ -208,9 +248,9 @@ def focused_roots():
     return [], table
 
 
-def focused_claude_session():
+def focused_claude_session() -> Path | None:
     roots, table = focused_roots()
-    candidates = []
+    candidates: list[Path] = []
     for root_pid in roots:
         for pid in [root_pid] + descendants(root_pid, table):
             stat = table.get(pid)
@@ -225,10 +265,17 @@ def focused_claude_session():
                     candidates.append(newest)
     if not candidates:
         return None
-    return max(set(candidates), key=lambda p: p.stat().st_mtime)
+    # dict.fromkeys deduplicates while preserving insertion order; semantically
+    # cleaner than set() here since we're only using the keys.
+    return max(dict.fromkeys(candidates), key=_mtime_or_zero)
 
 
-def focused_ghostty_shell(active, table):
+def focused_ghostty_shell(active: dict[str, Any], table: dict[int, dict[str, Any]]) -> int | None:
+    """Map the active Ghostty window's stableId-sorted index onto the
+    start-time-sorted index of its child shells. Assumption: window order
+    by stableId mirrors shell creation order. A shell restart or PID reuse
+    while windows remain open can silently return the wrong PID; that's an
+    accepted limitation until Ghostty exposes per-window PID directly."""
     if "ghostty" not in active.get("class", "").lower():
         return None
     ghostty_pid = active.get("pid")
@@ -253,9 +300,9 @@ def focused_ghostty_shell(active, table):
     return shells[active_index]["pid"]
 
 
-def focused_local_session():
+def focused_local_session() -> Path | None:
     roots, table = focused_roots()
-    candidates = []
+    candidates: list[Path] = []
     for root_pid in roots:
         for pid in [root_pid] + descendants(root_pid, table):
             stat = table.get(pid)
@@ -263,18 +310,18 @@ def focused_local_session():
                 candidates.extend(session_fds_for_pid(pid, ".codex", "rollout-"))
     if not candidates:
         return None
-    return max(set(candidates), key=lambda p: p.stat().st_mtime)
+    return max(dict.fromkeys(candidates), key=_mtime_or_zero)
 
 
-def text_parts(content, text_types):
-    out = []
+def text_parts(content: Iterable[Any] | None, text_types: set[str]) -> str:
+    out: list[str] = []
     for item in content or []:
         if isinstance(item, dict) and item.get("type") in text_types and item.get("text"):
             out.append(item["text"])
     return "".join(out)
 
 
-def parse_local(path):
+def parse_local(path: Path) -> str:
     for line in reversed(read_jsonl_tail(path)):
         try:
             obj = json.loads(line)
@@ -290,9 +337,9 @@ def parse_local(path):
     return ""
 
 
-def parse_claude(path):
+def parse_claude(path: Path) -> str:
     lines = read_jsonl_tail(path, 500_000)
-    last_req = None
+    last_req: str | None = None
     for line in reversed(lines):
         try:
             obj = json.loads(line)
@@ -303,13 +350,18 @@ def parse_claude(path):
             break
     if not last_req:
         return ""
-    parts = []
+    parts: list[str] = []
     for line in lines:
+        # Substring pre-filter is a fast path; the authoritative requestId
+        # check happens after json.loads so a user message that quotes an
+        # earlier requestId cannot contribute to the assembled output.
         if last_req not in line:
             continue
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if obj.get("requestId") != last_req:
             continue
         msg = obj.get("message") or {}
         if msg.get("role") == "assistant":
@@ -317,7 +369,7 @@ def parse_claude(path):
     return "".join(parts)
 
 
-def choose_session(source, explicit):
+def choose_session(source: str, explicit: str | None) -> tuple[Path | None, str]:
     if explicit:
         path = Path(explicit).expanduser()
         if not path.exists():
@@ -326,40 +378,49 @@ def choose_session(source, explicit):
             return path, source
         return path, "claude" if ".claude" in path.parts else "local"
     if source == "local":
-        path = focused_local_session() or newest_local_session()
-        return path, "local"
+        return focused_local_session() or newest_local_session(), "local"
     if source == "claude":
-        path = focused_claude_session() or newest_claude_session()
-        return path, "claude"
+        return focused_claude_session() or newest_claude_session(), "claude"
     local = focused_local_session() or newest_local_session()
     claude = focused_claude_session() or newest_claude_session()
-    candidates = [(p, kind) for p, kind in ((local, "local"), (claude, "claude")) if p]
+    candidates: list[tuple[Path, str]] = [
+        (p, kind) for p, kind in ((local, "local"), (claude, "claude")) if p
+    ]
     if not candidates:
         return None, source
-    return max(candidates, key=lambda item: item[0].stat().st_mtime)
+    return max(candidates, key=lambda item: _mtime_or_zero(item[0]))
 
 
-def file_uri(path):
+def file_uri(path: Path) -> str:
     return path.resolve().as_uri()
 
 
-def icon_uri(root):
+def icon_uri(root: Path) -> str:
+    """Resolve favicon URI, mirroring show.ps1's cascade exactly.
+
+    Returns a file:// URI for the first existing candidate. Falls through to
+    the default-ico path even when nothing exists, so the rendered HTML never
+    emits href="" (which produces an invalid request and a console error).
+    Keep this list in sync with show.ps1's $iconCandidates array.
+    """
     assets = root / "assets"
-    for name in (
+    candidates = (
         "icon-override.svg",
         "icon-override.png",
         "icon-override.jpg",
+        "icon-override.ico",
+        "icon-default.ico",
         "icon-default.png",
         "icon-default.svg",
-        "icon-default.ico",
-    ):
+    )
+    for name in candidates:
         candidate = assets / name
         if candidate.exists():
             return file_uri(candidate)
-    return ""
+    return file_uri(assets / "icon-default.ico")
 
 
-def write_html(root, message, session):
+def write_html(root: Path, message: str, session: Path) -> Path:
     template = root / "template.html"
     vendor = root / "vendor"
     if not template.exists():
@@ -367,32 +428,42 @@ def write_html(root, message, session):
     if not vendor.exists():
         die("vendor/ missing; run setup-linux.sh first")
     html = template.read_text(encoding="utf-8")
+    # Replacement order is load-bearing: ASSETS_BASE/icon.svg must run BEFORE
+    # the bare ASSETS_BASE prefix or the icon URI gets sliced. Same constraint
+    # is mirrored in show.ps1; keep them in sync.
     html = html.replace("ASSETS_BASE/icon.svg", icon_uri(root))
     html = html.replace("VENDOR_BASE", file_uri(vendor).rstrip("/"))
     html = html.replace("ASSETS_BASE", file_uri(root / "assets").rstrip("/"))
     if "MESSAGE_PLACEHOLDER" not in html:
         die("MESSAGE_PLACEHOLDER missing from template.html")
-    escaped = re.sub(r"</script", "<\\/script", message, flags=re.IGNORECASE)
-    html = html.replace("MESSAGE_PLACEHOLDER", escaped)
-    source = session.name.replace("--", "- -")
-    html = f"<!-- source: {source} | {time.ctime(session.stat().st_mtime)} -->\n" + html
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".html", prefix="texpop-", delete=False) as f:
+    # JSON data island. template.html now parses via JSON.parse, so any
+    # special characters in the message - including raw </script substrings -
+    # arrive as ordinary string contents instead of being interpreted by the
+    # HTML parser. The extra '</' -> '<\/' replacement is defence-in-depth:
+    # JSON treats '\/' as identical to '/' on decode, so the message
+    # round-trips unchanged.
+    encoded = json.dumps(message).replace("</", "<\\/")
+    html = html.replace("MESSAGE_PLACEHOLDER", encoded)
+    # Atomic create with 0o600 perms via tempfile.mkstemp - no race window
+    # between file creation (umask-bound) and a post-hoc chmod.
+    fd, path_str = tempfile.mkstemp(suffix=".html", prefix="texpop-")
+    out = Path(path_str)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(html)
-        out = Path(f.name)
-    os.chmod(out, 0o600)
     atexit.register(lambda path=out: path.unlink(missing_ok=True))
     return out
 
 
-def run_json(cmd):
+def run_json(cmd: list[str]) -> Any:
     try:
         proc = subprocess.run(cmd, text=True, capture_output=True, check=True)
         return json.loads(proc.stdout)
-    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError) as exc:
+        _debug(f"run_json({cmd[0]!r}) failed: {type(exc).__name__}: {exc}")
         return None
 
 
-def active_hyprland_rect():
+def active_hyprland_rect() -> tuple[int, int, int, int] | None:
     data = active_hyprland_window()
     if not data:
         return None
@@ -401,7 +472,7 @@ def active_hyprland_rect():
     return int(at[0]), int(at[1]), int(size[0]), int(size[1])
 
 
-def texpop_window_addresses():
+def texpop_window_addresses() -> set[str]:
     return {
         item.get("address")
         for item in hyprland_clients()
@@ -409,55 +480,87 @@ def texpop_window_addresses():
     }
 
 
-def close_texpop_windows():
+def close_texpop_windows() -> None:
     for address in texpop_window_addresses():
-        subprocess.run(["hyprctl", "dispatch", "closewindow", f"address:{address}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["hyprctl", "dispatch", "closewindow", f"address:{address}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
-def find_hyprland_window(pid, before=None):
-    before = before or set()
+def find_hyprland_window(pid: int, before: set[str] | None = None) -> str | None:
+    before_set = before or set()
     for item in hyprland_clients():
         if item.get("pid") == pid and item.get("title") == TITLE:
             address = item.get("address")
-            if address not in before:
+            if isinstance(address, str) and address not in before_set:
                 return address
     return None
 
 
-def valid_hyprland_address(address):
-    return isinstance(address, str) and re.fullmatch(r"0x[0-9a-fA-F]+", address)
+def valid_hyprland_address(address: Any) -> bool:
+    return isinstance(address, str) and bool(re.fullmatch(r"0x[0-9a-fA-F]+", address))
 
 
-def dispatch_hyprland_placement(address, rect):
+def dispatch_hyprland_placement(address: str, rect: tuple[int, int, int, int]) -> bool:
     if not valid_hyprland_address(address):
         return False
     x, y, w, h = rect
     selector = f"address:{address}"
-    subprocess.run(["hyprctl", "dispatch", "setfloating", selector], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["hyprctl", "dispatch", "resizewindowpixel", f"exact {w} {h},{selector}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["hyprctl", "dispatch", "movewindowpixel", f"exact {x} {y},{selector}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["hyprctl", "dispatch", "focuswindow", selector], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for args in (
+        ["hyprctl", "dispatch", "setfloating", selector],
+        ["hyprctl", "dispatch", "resizewindowpixel", f"exact {w} {h},{selector}"],
+        ["hyprctl", "dispatch", "movewindowpixel", f"exact {x} {y},{selector}"],
+        ["hyprctl", "dispatch", "focuswindow", selector],
+    ):
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return True
 
 
-def place_hyprland(pid, rect, mode, before=None):
-    if mode != "floating":
-        return
-    if not rect or not shutil.which("hyprctl"):
-        return
+def _place_when_visible(
+    pid: int,
+    rect: tuple[int, int, int, int] | None,
+    mode: str,
+    before: set[str] | None,
+    on_attempt: Any = None,
+) -> bool:
+    """Poll Hyprland up to 50 times (~5s) for a window owned by pid, then
+    position it. Returns True once placement dispatches, False otherwise.
+
+    on_attempt is a hook used by the Qt event-loop variant (show_with_qt) to
+    schedule the next poll via QTimer instead of time.sleep(); pass None for
+    the blocking variant."""
+    if mode != "floating" or not rect or not shutil.which("hyprctl"):
+        return False
     for _ in range(50):
         address = find_hyprland_window(pid, before)
         if address and dispatch_hyprland_placement(address, rect):
-            return
-        time.sleep(0.1)
+            return True
+        if on_attempt is None:
+            time.sleep(0.1)
+        else:
+            on_attempt()
+            return False
+    return False
 
 
-def show_with_qt(html_path, rect, hyprland_mode, before_windows=None):
+def place_hyprland(pid: int, rect: tuple[int, int, int, int] | None, mode: str, before: set[str] | None = None) -> bool:
+    """Blocking placement helper for Chromium backend. Returns True on success."""
+    return _place_when_visible(pid, rect, mode, before, on_attempt=None)
+
+
+def show_with_qt(
+    html_path: Path,
+    rect: tuple[int, int, int, int] | None,
+    hyprland_mode: str,
+    before_windows: set[str] | None = None,
+) -> bool:
     try:
         from PyQt6.QtCore import QTimer, QUrl
         from PyQt6.QtGui import QKeySequence, QShortcut
-        from PyQt6.QtWidgets import QApplication, QMainWindow
         from PyQt6.QtWebEngineWidgets import QWebEngineView
+        from PyQt6.QtWidgets import QApplication, QMainWindow
     except ImportError:
         return False
 
@@ -477,20 +580,26 @@ def show_with_qt(html_path, rect, hyprland_mode, before_windows=None):
     win.show()
     win.raise_()
     win.activateWindow()
-    if os.environ.get("XDG_CURRENT_DESKTOP", "").lower() == "hyprland":
-        attempts = {"count": 0}
 
-        def poll_hyprland():
+    if os.environ.get("XDG_CURRENT_DESKTOP", "").lower() == "hyprland":
+        # Qt's event loop forbids blocking sleeps in show_with_qt's thread, so
+        # we re-implement the polling shape from place_hyprland using QTimer.
+        # Keep the cadence (50 attempts at 100ms) in sync with _place_when_visible.
+        attempts = 0
+
+        def poll_hyprland() -> None:
+            nonlocal attempts
             if hyprland_mode != "floating" or not rect or not shutil.which("hyprctl"):
                 return
-            attempts["count"] += 1
+            attempts += 1
             address = find_hyprland_window(os.getpid(), before_windows)
             if address and dispatch_hyprland_placement(address, rect):
                 return
-            if attempts["count"] < 50:
+            if attempts < 50:
                 QTimer.singleShot(100, poll_hyprland)
 
         QTimer.singleShot(250, poll_hyprland)
+
     try:
         exit_code = app.exec()
     except RuntimeError as exc:
@@ -499,8 +608,17 @@ def show_with_qt(html_path, rect, hyprland_mode, before_windows=None):
     return exit_code == 0
 
 
-def browser_candidates():
-    for binary in ("google-chrome-stable", "google-chrome", "chromium", "chromium-browser", "microsoft-edge", "brave-browser"):
+def browser_candidates() -> Iterator[tuple[str, str]]:
+    # All Chromium-family binaries below accept the same --app and
+    # --user-data-dir flags, so we group them under one "chromium" kind.
+    for binary in (
+        "google-chrome-stable",
+        "google-chrome",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+        "brave-browser",
+    ):
         path = shutil.which(binary)
         if path:
             yield "chromium", path
@@ -509,14 +627,28 @@ def browser_candidates():
         yield "firefox", firefox
 
 
-def show_with_browser(html_path, rect, hyprland_mode, before_windows=None):
+def _profile_dir_root() -> Path:
+    """Prefer $XDG_RUNTIME_DIR (per-user, 0o700 by spec) over system /tmp so
+    profile paths aren't enumerable by other users."""
+    xdg = os.environ.get("XDG_RUNTIME_DIR")
+    if xdg:
+        candidate = Path(xdg)
+        if candidate.is_dir():
+            return candidate
+    return Path(tempfile.gettempdir())
+
+
+def show_with_browser(
+    html_path: Path,
+    rect: tuple[int, int, int, int] | None,
+    hyprland_mode: str,
+    before_windows: set[str] | None = None,
+) -> bool:
     uri = file_uri(html_path)
     for kind, binary in browser_candidates():
         if kind == "chromium":
-            profile = Path(tempfile.mkdtemp(prefix="texpop-browser-profile-"))
-            os.chmod(profile, 0o700)
-            if profile.stat().st_uid != os.getuid():
-                continue
+            profile = Path(tempfile.mkdtemp(prefix="texpop-browser-profile-", dir=_profile_dir_root()))
+            # mkdtemp creates with 0o700 on POSIX; no chmod / uid check needed.
             atexit.register(shutil.rmtree, profile, ignore_errors=True)
             args = [
                 binary,
@@ -537,23 +669,34 @@ def show_with_browser(html_path, rect, hyprland_mode, before_windows=None):
                 place_hyprland(proc.pid, rect, hyprland_mode, before_windows)
             proc.wait()
             return True
-        elif kind == "firefox":
+        if kind == "firefox":
             proc = subprocess.Popen([binary, "--new-window", uri], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             proc.wait()
             return True
     return False
 
 
-def main():
+def _resolved_hyprland_mode_default() -> str:
+    env = os.environ.get("TEXPOP_HYPRLAND_MODE")
+    if env is None:
+        return "floating"
+    if env not in _VALID_HYPRLAND_MODES:
+        die(f"invalid TEXPOP_HYPRLAND_MODE={env!r}; expected one of {_VALID_HYPRLAND_MODES}")
+    return env
+
+
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", choices=("auto", "local", "claude"), default="auto")
     parser.add_argument("--session")
     parser.add_argument("--print-message", action="store_true")
     parser.add_argument("--browser", action="store_true")
-    parser.add_argument("--hyprland-mode", choices=("floating", "tiled", "none"), default=os.environ.get("TEXPOP_HYPRLAND_MODE", "floating"))
+    parser.add_argument(
+        "--hyprland-mode",
+        choices=_VALID_HYPRLAND_MODES,
+        default=_resolved_hyprland_mode_default(),
+    )
     args = parser.parse_args()
-    if args.hyprland_mode not in ("floating", "tiled", "none"):
-        die(f"invalid hyprland mode: {args.hyprland_mode}")
 
     root = Path(__file__).resolve().parent
     session, kind = choose_session(args.source, args.session)

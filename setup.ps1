@@ -2,10 +2,11 @@
 # Re-run to refresh. Idempotent: skips files that already exist unless -Force.
 #
 # SECURITY: every downloaded file is verified against a pinned SHA-256 hash
-# in vendor.lock. If jsDelivr serves a tampered or unexpectedly-changed file, the
-# download is deleted and the script reports a failure. To upgrade vendor
+# in vendor.lock. If jsDelivr serves a tampered or unexpectedly-changed file,
+# the download is deleted and the script reports a failure. To upgrade vendor
 # versions, bump vendor.lock, run with -Force -NoVerifyHashes to fetch the new
-# bytes, then update vendor.lock from `Get-FileHash vendor\... -Algorithm SHA256`.
+# bytes, then update vendor.lock hash lines from
+# 'Get-FileHash vendor\... -Algorithm SHA256'.
 
 [CmdletBinding()]
 param(
@@ -26,9 +27,14 @@ foreach ($d in @($vendor, $katex, $katexFnt)) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Path $d | Out-Null }
 }
 
+# ---------- Parse vendor.lock ----------
+# vendor.lock is the single source of truth for versions, fonts, and hashes.
+# Both setup.ps1 (this file) and setup-linux.sh consume the same format; keep
+# the parsers in sync.
 $katexVer = $null
 $mdVer    = $null
 $expectedHashes = @{}
+$fonts = @()
 if (-not (Test-Path $lock)) {
     throw "Missing vendor manifest: $lock"
 }
@@ -40,6 +46,8 @@ foreach ($line in Get-Content -LiteralPath $lock) {
         $katexVer = $parts[2]
     } elseif ($parts.Count -ge 3 -and $parts[0] -eq 'version' -and $parts[1] -eq 'markdown-it') {
         $mdVer = $parts[2]
+    } elseif ($parts.Count -ge 2 -and $parts[0] -eq 'font') {
+        $fonts += $parts[1]
     } elseif ($parts[0] -eq 'hash' -and $parts.Count -ge 3) {
         $expectedHashes[$parts[1]] = $parts[2]
     } else {
@@ -48,6 +56,9 @@ foreach ($line in Get-Content -LiteralPath $lock) {
 }
 if (-not $katexVer -or -not $mdVer) {
     throw 'vendor.lock must define katex and markdown-it versions'
+}
+if ($fonts.Count -eq 0) {
+    throw 'vendor.lock must define at least one font'
 }
 if ($NoVerifyHashes) {
     Write-Warning 'Hash verification disabled. Use only for trusted vendor refreshes.'
@@ -62,16 +73,6 @@ $jobs = @(
     @{ url = "$katexCdn/contrib/auto-render.min.js"; dst = Join-Path $katex  'auto-render.min.js' }
 )
 
-$fonts = @(
-    'KaTeX_AMS-Regular','KaTeX_Caligraphic-Bold','KaTeX_Caligraphic-Regular',
-    'KaTeX_Fraktur-Bold','KaTeX_Fraktur-Regular',
-    'KaTeX_Main-Bold','KaTeX_Main-BoldItalic','KaTeX_Main-Italic','KaTeX_Main-Regular',
-    'KaTeX_Math-BoldItalic','KaTeX_Math-Italic',
-    'KaTeX_SansSerif-Bold','KaTeX_SansSerif-Italic','KaTeX_SansSerif-Regular',
-    'KaTeX_Script-Regular',
-    'KaTeX_Size1-Regular','KaTeX_Size2-Regular','KaTeX_Size3-Regular','KaTeX_Size4-Regular',
-    'KaTeX_Typewriter-Regular'
-)
 foreach ($f in $fonts) {
     $jobs += @{ url = "$katexCdn/fonts/$f.woff2"; dst = Join-Path $katexFnt "$f.woff2" }
 }
@@ -87,7 +88,10 @@ foreach ($j in $jobs) {
     } else {
         Write-Host ("[{0,2}/{1}] fetch {2}" -f $i, $total, $leaf)
         try {
-            Invoke-WebRequest -Uri $j.url -OutFile $j.dst -UseBasicParsing
+            # Bound redirects to match setup-linux.sh (--max-redirs 3). PowerShell's
+            # default is 5; a chain longer than 3 is almost always a misconfiguration
+            # or a redirector pivoting hosts.
+            Invoke-WebRequest -Uri $j.url -OutFile $j.dst -UseBasicParsing -MaximumRedirection 3
         } catch {
             Write-Warning ("Failed: {0}`n  -> {1}" -f $j.url, $_.Exception.Message)
             $failures++
@@ -97,7 +101,7 @@ foreach ($j in $jobs) {
     if ($NoVerifyHashes) { continue }
     $expected = $expectedHashes[$leaf]
     if (-not $expected) {
-        Write-Warning ("No pinned hash for '{0}' -- skipping verification (update `$expectedHashes if you trust this file)" -f $leaf)
+        Write-Warning ("No pinned hash for '{0}'. Update vendor.lock if you trust this file." -f $leaf)
         continue
     }
     if (-not (Test-Path $j.dst)) { continue }

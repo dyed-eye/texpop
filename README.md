@@ -104,7 +104,10 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
    Use `--source local`, `--source claude`, or `--session /path/to/session.jsonl`
    when you want deterministic selection.
    On Hyprland, use `--hyprland-mode floating` to overlay the focused terminal
-   or `--hyprland-mode tiled` to open as a normal tiled window.
+   or `--hyprland-mode tiled` to open as a normal tiled window. On Sway, GNOME,
+   KDE, or any non-Hyprland compositor, pass `--hyprland-mode none` (or set
+   `TEXPOP_HYPRLAND_MODE=none`) — the default `floating` is a no-op there but
+   prints a slight delay while it polls for a `hyprctl` binary that does not exist.
 
 5. **Bind a hotkey in your compositor.**
 
