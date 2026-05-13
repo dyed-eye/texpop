@@ -5,17 +5,17 @@ set -euo pipefail
 
 force=0
 no_verify=0
-yes_no_verify=0
+assume_yes=0
 for arg in "$@"; do
   case "$arg" in
     --force) force=1 ;;
     --no-verify-hashes) no_verify=1 ;;
-    --yes-skip-verify) yes_no_verify=1 ;;
+    -y|--yes) assume_yes=1 ;;
     -h|--help)
-      printf 'Usage: %s [--force] [--no-verify-hashes [--yes-skip-verify]]\n' "$0"
+      printf 'Usage: %s [--force] [--no-verify-hashes [-y|--yes]]\n' "$0"
       printf '  --force                refetch every file even if present\n'
       printf '  --no-verify-hashes     skip SHA-256 verification (DANGEROUS)\n'
-      printf '  --yes-skip-verify      bypass interactive y/N confirmation for --no-verify-hashes\n'
+      printf '  -y, --yes              auto-confirm the --no-verify-hashes prompt\n'
       exit 0
       ;;
     *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
@@ -32,16 +32,16 @@ fi
 
 if [[ "$no_verify" -eq 1 ]]; then
   printf 'WARNING: hash verification disabled. Vendor files will be installed without integrity checking.\n' >&2
-  if [[ "$yes_no_verify" -ne 1 ]]; then
+  if [[ "$assume_yes" -ne 1 ]]; then
     if [[ -t 0 ]]; then
-      printf 'Type "yes" to continue: ' >&2
+      printf 'Type "yes" to continue (or pass -y to skip this prompt next time): ' >&2
       read -r confirm
-      if [[ "$confirm" != "yes" ]]; then
-        printf 'Aborted.\n' >&2
-        exit 1
-      fi
+      case "$confirm" in
+        y|Y|yes|YES|Yes) : ;;
+        *) printf 'Aborted.\n' >&2; exit 1 ;;
+      esac
     else
-      printf 'Non-interactive shell; rerun with --yes-skip-verify to bypass the prompt.\n' >&2
+      printf 'Non-interactive shell with --no-verify-hashes; rerun with -y (or --yes) to bypass the confirmation.\n' >&2
       exit 1
     fi
   fi

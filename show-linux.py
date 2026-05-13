@@ -270,6 +270,21 @@ def focused_claude_session() -> Path | None:
     return max(dict.fromkeys(candidates), key=_mtime_or_zero)
 
 
+def _parse_stable_id(value: object) -> int:
+    """Hyprland stableId is decimal-as-string on older versions and hex (no
+    '0x' prefix) on newer ones. The value is only used as a monotone sort
+    key, so int(str, 16) handles both representations - decimal '123' parses
+    as 0x123, which still produces stable relative ordering."""
+    if isinstance(value, int):
+        return value
+    if not value:
+        return 0
+    try:
+        return int(str(value), 16)
+    except (TypeError, ValueError):
+        return 0
+
+
 def focused_ghostty_shell(active: dict[str, Any], table: dict[int, dict[str, Any]]) -> int | None:
     """Map the active Ghostty window's stableId-sorted index onto the
     start-time-sorted index of its child shells. Assumption: window order
@@ -284,7 +299,7 @@ def focused_ghostty_shell(active: dict[str, Any], table: dict[int, dict[str, Any
         for c in hyprland_clients()
         if c.get("pid") == ghostty_pid and "ghostty" in c.get("class", "").lower()
     ]
-    clients.sort(key=lambda c: int(c.get("stableId") or 0))
+    clients.sort(key=lambda c: _parse_stable_id(c.get("stableId")))
     active_address = active.get("address")
     active_index = next((i for i, c in enumerate(clients) if c.get("address") == active_address), None)
     if active_index is None:
