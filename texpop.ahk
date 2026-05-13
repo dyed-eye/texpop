@@ -45,11 +45,17 @@ IsTerminalActive() {
 ^+!v::TriggerDiagnose
 #HotIf
 
+AmbiguousFlag := A_Temp "\texpop-ambiguous.flag"
+
 TriggerPopup(*) {
-    global ShowPs1
+    global ShowPs1, AmbiguousFlag
     if !FileExist(ShowPs1) {
         MsgBox "show.ps1 not found at:`n" ShowPs1, "texpop", "Iconx"
         return
+    }
+    ; Clear any stale ambiguous flag from a previous run.
+    if FileExist(AmbiguousFlag) {
+        try FileDelete AmbiguousFlag
     }
     ToolTip "Loading last message..."
     SetTimer ClearTip, -2200
@@ -72,6 +78,7 @@ TriggerPopup(*) {
 }
 
 ActivateLatexPopup(attempt) {
+    global AmbiguousFlag
     static MAX_ATTEMPTS := 25  ; ~3 s total
     title := "TeXpop"
     if WinExist(title) {
@@ -82,6 +89,15 @@ ActivateLatexPopup(attempt) {
             WinSetAlwaysOnTop(false, title)
             WinActivate(title)
         }
+        return
+    }
+    ; show.ps1 sets this when it refuses to guess between multiple Claude
+    ; tabs. Replace the 'Loading...' tooltip with a rename hint and stop
+    ; polling -- no popup window is coming.
+    if FileExist(AmbiguousFlag) {
+        try FileDelete AmbiguousFlag
+        ToolTip "/rename the chat"
+        SetTimer ClearTip, -2500
         return
     }
     if (attempt < MAX_ATTEMPTS) {
