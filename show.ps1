@@ -179,6 +179,48 @@ public static class Native {
         return matched;
     }
 
+    public static IntPtr[] FindAllVisibleHwndsForPids(int[] pids) {
+        var pidSet = new System.Collections.Generic.HashSet<uint>();
+        foreach (var p in pids) pidSet.Add((uint)p);
+        var matched = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            int len = GetWindowTextLength(hWnd);
+            if (len <= 0) return true;
+            uint pid;
+            GetWindowThreadProcessId(hWnd, out pid);
+            if (pidSet.Contains(pid)) matched.Add(hWnd);
+            return true;
+        }, IntPtr.Zero);
+        return matched.ToArray();
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    // Enumerate every top-level window whose class name matches exactly.
+    // Used to find ALL Windows Terminal windows by their CASCADIA_HOSTING_WINDOW_CLASS,
+    // which is more robust than filtering by PID: WT may run a single process for
+    // all windows (modern default) OR a separate process per window (depending on
+    // 'windowingBehavior' settings), and windows on other virtual desktops have
+    // their own quirks. requireVisible=false lets us pick up cross-desktop /
+    // cloaked windows too. Empty-title windows are skipped regardless.
+    public static IntPtr[] FindWindowsByClassName(string className, bool requireVisible) {
+        var matched = new System.Collections.Generic.List<IntPtr>();
+        EnumWindows((hWnd, lParam) => {
+            if (requireVisible && !IsWindowVisible(hWnd)) return true;
+            int tlen = GetWindowTextLength(hWnd);
+            if (tlen <= 0) return true;
+            var sb = new StringBuilder(256);
+            if (GetClassName(hWnd, sb, sb.Capacity) == 0) return true;
+            if (string.Equals(sb.ToString(), className, StringComparison.OrdinalIgnoreCase)) {
+                matched.Add(hWnd);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return matched.ToArray();
+    }
+
     [DllImport("user32.dll")]
     public static extern int GetWindowTextLength(IntPtr hWnd);
 
@@ -326,6 +368,47 @@ function Get-WtSelectedTabInfo {
     return $name
 }
 
+# Enumerate ALL TabItem names under a Windows Terminal window. Used to scope
+# candidate jsonls to the focused WT window: modern WT runs every window
+# under one WindowsTerminal.exe process, so the process-tree walk below
+# would otherwise see claude.exe descendants from every window at once.
+# Tab titles in other windows are used as a per-jsonl exclusion set.
+function Get-WtAllTabNames {
+    param([IntPtr]$wtHwnd)
+    try {
+        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+        Add-Type -AssemblyName UIAutomationTypes  -ErrorAction Stop
+    } catch {
+        Log "UIA assemblies failed to load: $_"
+        return @()
+    }
+    try {
+        $root = [System.Windows.Automation.AutomationElement]::FromHandle($wtHwnd)
+    } catch {
+        Log "UIA FromHandle threw: $_"
+        return @()
+    }
+    if (-not $root) { return @() }
+
+    $ctype = [System.Windows.Automation.AutomationElement]::ControlTypeProperty
+    $tabT  = [System.Windows.Automation.ControlType]::TabItem
+    $tree  = [System.Windows.Automation.TreeScope]::Descendants
+    $cond  = [System.Windows.Automation.PropertyCondition]::new($ctype, $tabT)
+
+    $tabs = $null
+    try { $tabs = $root.FindAll($tree, $cond) } catch { Log "UIA FindAll tabs threw: $_"; return @() }
+    if (-not $tabs) { return @() }
+
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($t in $tabs) {
+        try {
+            $n = $t.Current.Name
+            if ($n) { [void]$names.Add($n) }
+        } catch { }
+    }
+    return ,$names.ToArray()
+}
+
 # ---------- Adapter loading ----------
 
 # Each adapter file appends a hashtable to $script:Adapters with keys:
@@ -418,8 +501,40 @@ function Find-FocusedSession {
 
     # If WT, capture the selected tab's UIA name for use in title matching below.
     $wtTabName = $null
+    # Tab titles in *other* WT windows. Used by Claude adapter as an exclusion
+    # set so the process-tree walk doesn't pull in chats from windows that
+    # aren't focused. Empty when WT isn't foreground or only one WT window
+    # exists.
+    $wtOtherTabs = @()
     if ($fgName -ieq 'WindowsTerminal') {
         $wtTabName = Get-WtSelectedTabInfo -wtHwnd $fgHwnd
+
+        # Find every WT window by class name (more robust than by PID --
+        # works for both single-process and multi-process WT, and picks up
+        # windows on other virtual desktops).
+        try {
+            $wtHwnds = [LatexPopup.Native]::FindWindowsByClassName('CASCADIA_HOSTING_WINDOW_CLASS', $false)
+            Log "WT windows by class CASCADIA_HOSTING_WINDOW_CLASS: count=$($wtHwnds.Count)"
+            $otherList = [System.Collections.Generic.List[string]]::new()
+            foreach ($h in $wtHwnds) {
+                $hTitle = [LatexPopup.Native]::GetWindowTitle($h)
+                $hPid   = [uint32]0
+                [void][LatexPopup.Native]::GetWindowThreadProcessId($h, [ref]$hPid)
+                $isFg = ($h -eq $fgHwnd)
+                if ($isFg) {
+                    Log "  WT[fg] HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle'"
+                    continue
+                }
+                $names = Get-WtAllTabNames -wtHwnd $h
+                $sample = ($names | Select-Object -First 4) -join ' | '
+                Log "  WT     HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle' tabs=$($names.Count) sample='$sample'"
+                foreach ($n in $names) {
+                    if ($n) { [void]$otherList.Add($n) }
+                }
+            }
+            $wtOtherTabs = $otherList.ToArray()
+            Log "WT other-window tab names: count=$($wtOtherTabs.Count)"
+        } catch { Log "Enumerate WT windows threw: $_" }
     }
 
     # ---------- Walk process tree, collect ALL candidate descendants ----------
@@ -490,7 +605,7 @@ function Find-FocusedSession {
         Log "Adapter matched: $($adapter.Name)"
         $file = $null
         try {
-            $file = & $adapter.FindFocusedSession $candidates $fgTitle $wtTabName
+            $file = & $adapter.FindFocusedSession $candidates $fgTitle $wtTabName $wtOtherTabs
         } catch {
             Log "Adapter '$($adapter.Name)' FindFocusedSession threw: $_"
             continue

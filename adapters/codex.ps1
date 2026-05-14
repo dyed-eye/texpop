@@ -74,7 +74,10 @@ $codexMatch = {
 }
 
 $codexFindFocused = {
-    param($candidates, $foregroundTitle, $wtTabName)
+    # $wtOtherTabs is accepted for adapter-contract symmetry but unused: the
+    # Codex rollout layout isn't keyed by chat title, so other-window tab
+    # names don't help disambiguate.
+    param($candidates, $foregroundTitle, $wtTabName, $wtOtherTabs)
 
     $sessionsRoot = Get-CodexSessionsRoot
     Log "Codex sessions root: $sessionsRoot"

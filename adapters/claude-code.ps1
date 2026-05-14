@@ -20,7 +20,14 @@
 function Resolve-ClaudeProjectDirForCwd {
     param([string]$cwd, [string]$projectsRoot)
     if (-not $cwd) { return $null }
-    $encoded = $cwd.Replace(':', '-').Replace('\', '-').Replace('.', '-')
+    # Claude Code encodes project dir names by replacing EVERY non-alphanumeric
+    # codepoint with '-', not just ':' '\' '.'. Underscores, spaces, and
+    # non-ASCII letters (Cyrillic etc.) all collapse to one '-' per codepoint.
+    # PowerShell's -replace is Unicode-aware so the character class works on
+    # codepoints as expected. Examples:
+    #   C:\path\to\my_repo                 -> C--path-to-my-repo
+    #   C:\path\to\repo with spaces        -> C--path-to-repo-with-spaces
+    $encoded = ($cwd -replace '[^A-Za-z0-9]', '-')
     $candidates = @(
         $encoded,
         ($encoded.Substring(0,1).ToLower() + $encoded.Substring(1))
@@ -223,7 +230,7 @@ $claudeMatch = {
 }
 
 $claudeFindFocused = {
-    param($candidates, $foregroundTitle, $wtTabName)
+    param($candidates, $foregroundTitle, $wtTabName, $wtOtherTabs)
 
     $projectsRoot = $script:ClaudeProjectsRoot
 
@@ -253,6 +260,39 @@ $claudeFindFocused = {
     }
     Log "Candidate project dirs: $($projectDirs.Count)"
 
+    # Build a per-jsonl exclusion set from other WT windows' tab names. WT
+    # multiplexes all windows under one WindowsTerminal.exe process so the
+    # process-tree walk above pulls in claude.exe descendants from every
+    # window at once; any jsonl whose ai-title equals a tab title in an
+    # *unfocused* WT window almost certainly belongs to that other window
+    # and should be skipped by the newest-jsonl fallback below. The
+    # title-match step still runs without exclusion -- an exact ai-title
+    # match against the foreground title is a stronger signal than any
+    # window-scope heuristic.
+    $excludedJsonls = @{}
+    if ($wtOtherTabs -and $wtOtherTabs.Count -gt 0 -and $projectDirs.Count -gt 0) {
+        $otherNorm = @{}
+        foreach ($t in $wtOtherTabs) {
+            $n = Normalize-ClaudeTitle $t
+            if ($n) { $otherNorm[$n] = $true }
+        }
+        if ($otherNorm.Count -gt 0) {
+            foreach ($pd in $projectDirs) {
+                $jsonls = Get-ChildItem -Path $pd -Filter '*.jsonl' -File `
+                    -ErrorAction SilentlyContinue
+                foreach ($j in $jsonls) {
+                    $aiT = Get-ClaudeAiTitle $j
+                    if (-not $aiT) { continue }
+                    $aiN = Normalize-ClaudeTitle $aiT
+                    if ($otherNorm.ContainsKey($aiN)) {
+                        $excludedJsonls[$j.FullName] = $true
+                    }
+                }
+            }
+            Log "Window-scope exclusion: $($excludedJsonls.Count) jsonl(s) match other WT windows' tabs"
+        }
+    }
+
     # PRIMARY signal: match the WT/window title against ai-title in candidate jsonls.
     $titleSources = @()
     if ($foregroundTitle) { $titleSources += $foregroundTitle }
@@ -262,13 +302,26 @@ $claudeFindFocused = {
         if ($match) { return $match }
     }
 
-    # Fallback: newest jsonl across candidate project dirs (heuristic).
+    # Fallback: newest jsonl across candidate project dirs, excluding any
+    # whose ai-title appeared as a tab in a different WT window.
     $best = $null
+    $bestProj = $null
     foreach ($pd in $projectDirs) {
-        $j = Find-ClaudeNewestJsonl $pd
-        if (-not $j) { continue }
-        Log "  fallback newest in $($pd | Split-Path -Leaf): $($j.Name) (mtime $($j.LastWriteTime))"
-        if (-not $best -or $j.LastWriteTime -gt $best.LastWriteTime) { $best = $j }
+        $jsonls = Get-ChildItem -Path $pd -Filter '*.jsonl' -File `
+            -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
+        foreach ($j in $jsonls) {
+            if ($excludedJsonls.ContainsKey($j.FullName)) {
+                Log "  fallback skip (other-window): $($j.Name) in $($pd | Split-Path -Leaf)"
+                continue
+            }
+            if (-not $best -or $j.LastWriteTime -gt $best.LastWriteTime) {
+                $best = $j
+                $bestProj = $pd
+            }
+            # Newest non-excluded jsonl per project dir is enough for the
+            # cross-project comparison; stop scanning older ones.
+            break
+        }
     }
     if ($best) { Log "Tree-walk fallback chose: $($best.FullName)" }
     return $best
