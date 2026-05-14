@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
-from adapters.claude_code import last_assistant_turn
+from adapters import claude_code
+from adapters.claude_code import last_assistant_turn, project_dir_for_cwd
 from adapters.codex import CodexAdapter
 from focus import FocusedWindow
 from focus.gnome import _parse_eval_result
@@ -43,6 +45,27 @@ class LinuxAdapterTests(unittest.TestCase):
         self.addCleanup(path.unlink)
 
         self.assertEqual(last_assistant_turn(path), "one two")
+
+    def test_project_dir_for_cwd_encodes_every_non_alnum_codepoint(self) -> None:
+        # Claude Code encodes project dir names by replacing EVERY non-alphanumeric
+        # codepoint with '-' -- not just '/' and '.'. CWDs containing underscores,
+        # spaces, or non-ASCII codepoints must collapse to one '-' per codepoint.
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: shutil.rmtree(root, ignore_errors=True))
+        original_root = claude_code.projects_root
+        claude_code.projects_root = lambda: root
+        try:
+            # Underscore in a typical repo name (most common Linux trigger).
+            underscored = root / "-home-user-my-project"
+            underscored.mkdir()
+            self.assertEqual(project_dir_for_cwd("/home/user/my_project"), underscored)
+
+            # Space in a directory name.
+            spaced = root / "-tmp-some-dir"
+            spaced.mkdir()
+            self.assertEqual(project_dir_for_cwd("/tmp/some dir"), spaced)
+        finally:
+            claude_code.projects_root = original_root
 
 
 class LinuxFocusTests(unittest.TestCase):

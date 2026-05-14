@@ -48,7 +48,10 @@ def projects_root() -> Path:
 def project_dir_for_cwd(cwd: str | None) -> Path | None:
     if not cwd:
         return None
-    encoded = cwd.replace(":", "-").replace("\\", "-").replace("/", "-").replace(".", "-")
+    # Claude Code encodes project dir names by replacing EVERY non-alphanumeric
+    # codepoint with '-', not just ':' '\' '/' '.'. Underscores, spaces, and
+    # non-ASCII letters (Cyrillic etc.) all collapse to one '-' per codepoint.
+    encoded = re.sub(r"[^A-Za-z0-9]", "-", cwd)
     candidates = [encoded]
     if encoded:
         candidates.append(encoded[0].lower() + encoded[1:])
