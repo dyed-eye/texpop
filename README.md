@@ -102,12 +102,8 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
    ```
 
    Use `--source local`, `--source claude`, or `--session /path/to/session.jsonl`
-   when you want deterministic selection.
-   On Hyprland, use `--hyprland-mode floating` to overlay the focused terminal
-   or `--hyprland-mode tiled` to open as a normal tiled window. On Sway, GNOME,
-   KDE, or any non-Hyprland compositor, pass `--hyprland-mode none` (or set
-   `TEXPOP_HYPRLAND_MODE=none`) — the default `floating` is a no-op there but
-   prints a slight delay while it polls for a `hyprctl` binary that does not exist.
+   when you want deterministic selection. Linux placement is compositor-driven;
+   the old `--hyprland-mode` switch is gone.
 
 5. **Bind a hotkey in your compositor.**
 
@@ -117,8 +113,7 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
    Hyprland example:
 
    ```ini
-   bind = CTRL ALT, V, exec, ~/.local/share/texpop/show-linux.py --source auto --hyprland-mode floating
-   bind = CTRL ALT SHIFT, V, exec, ~/.local/share/texpop/show-linux.py --source auto --hyprland-mode tiled
+   bind = CTRL ALT, V, exec, ~/.local/share/texpop/show-linux.py --source auto
    ```
 
    Sway example:
@@ -127,10 +122,10 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
    bindsym Ctrl+Alt+v exec ~/.local/share/texpop/show-linux.py --source auto
    ```
 
-On Hyprland, texpop reads the active window geometry and floats the popup over
-the terminal when `--hyprland-mode floating` is used. Sway, GNOME, and KDE can
-run the same script, but exact Wayland placement depends on the compositor and
-desktop shortcut rules.
+On Linux, texpop reads focused-window PID and geometry through a compositor
+resolver. Hyprland, Sway, and X11 have direct support. GNOME and KDE are
+best-effort because their Wayland sessions do not expose a stable universal
+foreground PID API.
 
 ### Windows
 
@@ -182,15 +177,14 @@ stored title matches the active tab wins. Press `Ctrl + Alt + Shift + V` to dump
 the full detection cascade to `%TEMP%\texpop-debug.log` if it ever picks the
 wrong chat.
 
-On Linux, the current port first tries to resolve the focused session from the
-active Ghostty window, its child shell, and the CLI process's transcript path.
-Codex is resolved from open `~/.codex/sessions/rollout-*.jsonl` handles. Claude
-Code is resolved from open `~/.claude/projects/*.jsonl` handles, or from the
-focused process CWD mapped to Claude's encoded project directory. This works for
-separate Ghostty windows on Hyprland. If the resolver cannot identify the active
-session, texpop falls back to the newest matching `.jsonl` transcript for the
-selected source (`--source local`, `--source claude`, or `--source auto`). Use
-`--session /path/to/session.jsonl` when you need a hard override.
+On Linux, texpop resolves the focused compositor window, asks terminal IPC for
+the active pane when tmux, WezTerm, or Kitty expose one, applies the Hyprland +
+Ghostty focused-window heuristic when needed, walks `/proc` from that PID, and
+then lets the adapter chain pick and parse the session. If none of those focused
+signals identify a session, it falls back to the newest matching `.jsonl`
+transcript for the selected source (`--source local`, `--source claude`, or
+`--source auto`). Use `--session /path/to/session.jsonl` when you need a hard
+override.
 
 ---
 
@@ -210,15 +204,15 @@ selected source (`--source local`, `--source claude`, or `--source auto`). Use
 
 On Windows, texpop is built around a `ChatSourceAdapter` interface — each AI CLI gets its own adapter file in `adapters/`. The orchestrator in `show.ps1` walks the foreground process tree, then asks each registered adapter "is this yours?" The first adapter to match owns the rest of the pipeline: pick the focused session file, parse the transcript, return the last assistant message as Markdown.
 
-The Linux port currently keeps Claude/Codex transcript parsing in `show-linux.py`.
-For Hyprland + Ghostty, it resolves the focused Ghostty window to the CLI
-process's active transcript where possible. Other terminal/compositor
-combinations fall back to newest-session selection unless you pass `--session`.
+The Linux port uses the same adapter shape in Python. `show-linux.py` is only
+the orchestrator: focus resolver, terminal IPC, process walk, adapter, renderer.
 
 | Adapter | File | Status |
 |---|---|---|
 | Claude Code | `adapters/claude-code.ps1` | Stable, primary target. Reads `~/.claude/projects/<encoded>/*.jsonl`, joins assistant text by `requestId`, matches `aiTitle` against window/tab titles. |
 | Codex CLI | `adapters/codex.ps1` | Experimental. Best-effort transcript discovery; format may shift between Codex CLI versions. PRs welcome — verify against your installed Codex version and submit fixes. |
+| Claude Code Linux | `adapters/claude_code.py` | Reads focused file handles or maps process CWD to `~/.claude/projects/<encoded>/*.jsonl`, then joins assistant text by `requestId`. |
+| Codex CLI Linux | `adapters/codex.py` | Reads focused rollout file handles when available, otherwise newest rollout under `~/.codex/sessions`. |
 
 Adding a new Windows adapter is a single PowerShell file that exposes `Name`, `Description`, `Match`, `FindFocusedSession`, `GetLastAssistantTurn` and appends itself to `$script:Adapters`. Use `adapters/claude-code.ps1` as the template.
 
@@ -228,10 +222,10 @@ Adding a new Windows adapter is a single PowerShell file that exposes `Name`, `D
 
 These are on the roadmap but not shipped:
 
-- **Linux focused-chat detection outside Ghostty.** The Linux port resolves
-  focused Codex and Claude Code sessions for separate Ghostty windows on
-  Hyprland. Other terminals and Ghostty tabs/panes still need terminal-specific
-  focus plumbing.
+- **More Linux focus providers.** tmux, WezTerm, Kitty, Hyprland, Sway, X11,
+  and Hyprland + Ghostty are wired. GNOME and KDE are best-effort until their
+  Wayland focus APIs become stable enough for exact PID + geometry lookup
+  without desktop extensions.
 - **macOS port.** Similar shape: `skhd`/`Hammerspoon`, `lsof`/`proc_pidinfo`, the macOS Accessibility API, a Safari/Chromium app window. Same "open an issue first" rule.
 - **Codex CLI adapter.** `adapters/codex.ps1` ships experimental, doc-driven. The transcript layout was reverse-engineered from Codex CLI documentation and a couple of community blog posts — not from a parsed real session. PRs welcome from anyone running an actual Codex CLI install who can verify the field shapes and tighten the parser.
 
