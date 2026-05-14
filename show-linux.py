@@ -66,7 +66,7 @@ def adapter_for_source(adapters: list[ChatSourceAdapter], source: str, session: 
         if ".claude" in session.parts:
             source = "claude"
         elif ".codex" in session.parts:
-            source = "local"
+            source = "codex"
         else:
             source = "local"
     for adapter in adapters:

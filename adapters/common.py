@@ -21,12 +21,18 @@ def newest_file(root: Path, pattern: str, excluded_parts: set[str] | None = None
 
 
 def read_jsonl_tail(path: Path, max_bytes: int = 2 * 1024 * 1024) -> list[str]:
-    size = path.stat().st_size
-    with path.open("rb") as handle:
-        if size > max_bytes:
-            handle.seek(-max_bytes, os.SEEK_END)
-            handle.readline()
-        data = handle.read()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            if size > max_bytes:
+                handle.seek(-max_bytes, os.SEEK_END)
+                handle.readline()
+            else:
+                handle.seek(0)
+            data = handle.read(max_bytes)
+    except OSError:
+        return []
     return data.decode("utf-8", "replace").splitlines()
 
 
