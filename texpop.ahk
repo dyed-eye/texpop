@@ -52,7 +52,11 @@ TriggerPopup(*) {
         return
     }
     ToolTip "Loading last message..."
-    SetTimer ClearTip, -2200
+    ; Fallback timer: clears the tooltip if the popup never appears (failure
+    ; case). When the popup IS detected, ActivateLatexPopup clears it
+    ; immediately, so the timer fires harmlessly on already-cleared state.
+    ; 6000 ms is long enough for Edge cold-boot on slower machines.
+    SetTimer ClearTip, -6000
 
     ; Grant any descendant process the right to set foreground (one-shot).
     DllCall("AllowSetForegroundWindow", "uint", 0xFFFFFFFF)
@@ -67,14 +71,20 @@ TriggerPopup(*) {
     }
 
     ; Use AHK's hardened foreground-activation (uses AttachThreadInput under the hood).
-    ; Poll every 120 ms until the popup window appears, up to ~3 s.
+    ; Poll every 120 ms until the popup window appears, up to ~6 s -- matches
+    ; the fallback ClearTip timer so the tooltip and the activation give up
+    ; at the same moment on a failed launch.
     SetTimer ActivateLatexPopup.Bind(0), -200
 }
 
 ActivateLatexPopup(attempt) {
-    static MAX_ATTEMPTS := 25  ; ~3 s total
+    static MAX_ATTEMPTS := 50  ; ~6 s total (50 * 120ms)
     title := "TeXpop"
     if WinExist(title) {
+        ; Window is up -- kill the "Loading..." tooltip immediately, so the
+        ; user doesn't see it linger after the popup has appeared (and doesn't
+        ; see it vanish before the popup appears on slow cold-boot).
+        ToolTip
         try {
             WinActivate(title)
             WinSetAlwaysOnTop(true, title)

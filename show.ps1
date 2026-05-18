@@ -725,7 +725,7 @@ foreach ($p in $edgeCandidates) {
 $fileUri     = ([uri]$outHtml).AbsoluteUri
 # Profile dir is versioned; bump the suffix to flush Edge's favicon/state cache
 # when the icon or window-state behaviour changes.
-$userDataDir = Join-Path $env:LOCALAPPDATA 'texpop\edge-profile-v3'
+$userDataDir = Join-Path $env:LOCALAPPDATA 'texpop\edge-profile-v4'
 if (-not (Test-Path $userDataDir)) {
     New-Item -ItemType Directory -Force -Path $userDataDir | Out-Null
 }
@@ -833,6 +833,93 @@ public static int CloseTeXpopMsedgeWindows(string substr) {
     Log "Launched Edge"
 
     try {
+        # AUMID type registration. Edge --app assigns its own
+        # AppUserModelID to the window, which is what the Windows shell uses
+        # to group taskbar entries and pick the taskbar icon -- so the
+        # WM_SETICON below is overridden by Edge's grouped-app icon. Setting
+        # our own PKEY_AppUserModel_ID makes the shell treat this window as a
+        # distinct app from other Edge instances, after which WM_SETICON
+        # wins. PKEY_AppUserModel_RelaunchIconResource gives the shell a
+        # direct icon-file reference as a fallback. Worked silently in v0.1.0
+        # because Edge of that vintage didn't bind the AUMID this aggressively.
+        if (-not ('LatexPopupAumid.Native' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace LatexPopupAumid {
+
+[StructLayout(LayoutKind.Sequential, Pack = 4)]
+public struct PROPERTYKEY {
+    public Guid fmtid;
+    public uint pid;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct PROPVARIANT {
+    public ushort vt;
+    public ushort wReserved1;
+    public ushort wReserved2;
+    public ushort wReserved3;
+    public IntPtr pwszVal;
+    public IntPtr padding;
+}
+
+[ComImport]
+[Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+public interface IPropertyStore {
+    void GetCount(out uint cProps);
+    void GetAt(uint iProp, out PROPERTYKEY pkey);
+    void GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+    void SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+    void Commit();
+}
+
+public static class Native {
+    [DllImport("shell32.dll")]
+    public static extern int SHGetPropertyStoreForWindow(
+        IntPtr hwnd, ref Guid iid,
+        [MarshalAs(UnmanagedType.Interface)] out IPropertyStore ppv);
+
+    private static void SetStringValue(IPropertyStore store, Guid fmtid, uint pid, string value) {
+        PROPERTYKEY key = new PROPERTYKEY();
+        key.fmtid = fmtid;
+        key.pid   = pid;
+        PROPVARIANT pv = new PROPVARIANT();
+        pv.vt       = 31; // VT_LPWSTR
+        pv.pwszVal  = Marshal.StringToCoTaskMemUni(value);
+        try {
+            store.SetValue(ref key, ref pv);
+        } finally {
+            // IPropertyStore.SetValue copies the value; we own the buffer.
+            Marshal.FreeCoTaskMem(pv.pwszVal);
+        }
+    }
+
+    public static int SetWindowAumid(IntPtr hwnd, string aumid, string iconResource) {
+        Guid iidIPropertyStore = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+        // PKEY_AppUserModel_ID and PKEY_AppUserModel_RelaunchIconResource
+        // both share this format ID; differentiated by pid (5 / 3).
+        Guid fmtAum = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        IPropertyStore store;
+        int hr = SHGetPropertyStoreForWindow(hwnd, ref iidIPropertyStore, out store);
+        if (hr != 0 || store == null) return hr;
+        try {
+            SetStringValue(store, fmtAum, 5, aumid);
+            if (!string.IsNullOrEmpty(iconResource)) {
+                SetStringValue(store, fmtAum, 3, iconResource);
+            }
+            store.Commit();
+        } finally {
+            Marshal.ReleaseComObject(store);
+        }
+        return 0;
+    }
+}
+}
+'@ -ErrorAction SilentlyContinue
+        }
         # Note: this Add-Type registers a SECOND inline type alongside
         # LatexPopupCloser.Win above. The two share several P/Invoke
         # declarations (EnumWindows / GetWindowText / IsWindowVisible);
@@ -903,23 +990,33 @@ public static extern System.IntPtr LoadImage(System.IntPtr hInst, string name, u
                 [LatexPopupSwp.Win]::SetForegroundWindow($h) | Out-Null
                 Log "Brought Edge popup to foreground (HWND=0x$([Convert]::ToString([int64]$h, 16)))"
 
-                # Force the taskbar icon directly via WM_SETICON. Edge sets its
-                # own icon when the favicon loads, possibly slightly after we
-                # hit this point; two sends with a small gap is enough to win
-                # that race in practice (was 5x600ms = 3s blocking on every
-                # hotkey press, which the user perceives as latency).
+                # Assign our own AppUserModelID to the window so the shell
+                # stops grouping us under Edge's own AUMID (and therefore
+                # showing Edge's taskbar/Alt-Tab icon). Once the AUMID is
+                # distinct, the WM_SETICON below becomes the taskbar icon.
+                # PKEY_AppUserModel_RelaunchIconResource also tells the shell
+                # the icon file directly, as a belt-and-suspenders fallback.
+                $icoPath = Join-Path $scriptDir 'assets\icon-default.ico'
                 try {
-                    $icoPath = Join-Path $scriptDir 'assets\icon-default.ico'
+                    $iconRes = if (Test-Path $icoPath) { "$icoPath,0" } else { $null }
+                    $hr = [LatexPopupAumid.Native]::SetWindowAumid($h, 'TeXpop.Popup', $iconRes)
+                    Log "SetWindowAumid hr=0x$([Convert]::ToString([int64]$hr, 16)) icon='$iconRes'"
+                } catch { Log "SetWindowAumid threw: $_" }
+
+                # Force the taskbar icon directly via WM_SETICON. Edge sets
+                # its own icon when the favicon loads, possibly slightly
+                # after we hit this point. With the AUMID override above the
+                # WM_SETICON is now what binds to the *new* taskbar group, so
+                # one round of sends without a sleep is enough (was
+                # 2 x 350 ms; before that 5 x 600 ms).
+                try {
                     if (Test-Path $icoPath) {
                         # IMAGE_ICON = 1, LR_LOADFROMFILE = 0x10
                         $hIcon = [LatexPopupSwp.Win]::LoadImage([IntPtr]::Zero, $icoPath, 1, 256, 256, 0x10)
-                        for ($k = 0; $k -lt 2; $k++) {
-                            # WM_SETICON = 0x0080, ICON_SMALL = 0, ICON_BIG = 1
-                            [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]0, $hIcon) | Out-Null
-                            [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]1, $hIcon) | Out-Null
-                            Start-Sleep -Milliseconds 350
-                        }
-                        Log "Forced taskbar icon via WM_SETICON x2 (hIcon=0x$([Convert]::ToString([int64]$hIcon, 16)))"
+                        # WM_SETICON = 0x0080, ICON_SMALL = 0, ICON_BIG = 1
+                        [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]0, $hIcon) | Out-Null
+                        [LatexPopupSwp.Win]::SendMessage($h, 0x0080, [IntPtr]1, $hIcon) | Out-Null
+                        Log "Forced taskbar icon via WM_SETICON (hIcon=0x$([Convert]::ToString([int64]$hIcon, 16)))"
                     } else {
                         Log "icon-default.ico not found for WM_SETICON"
                     }
