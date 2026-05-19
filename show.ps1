@@ -501,10 +501,10 @@ function Find-FocusedSession {
 
     # If WT, capture the selected tab's UIA name for use in title matching below.
     $wtTabName = $null
-    # Tab titles in *other* WT windows. Used by Claude adapter as an exclusion
-    # set so the process-tree walk doesn't pull in chats from windows that
-    # aren't focused. Empty when WT isn't foreground or only one WT window
-    # exists.
+    # Tab titles in *non-selected* WT tabs across ALL WT windows (including
+    # other tabs in the focused window). Used by Claude adapter as an
+    # exclusion set so the process-tree walk doesn't pull in chats from tabs
+    # that aren't focused. Empty when WT isn't foreground.
     $wtOtherTabs = @()
     if ($fgName -ieq 'WindowsTerminal') {
         $wtTabName = Get-WtSelectedTabInfo -wtHwnd $fgHwnd
@@ -521,19 +521,27 @@ function Find-FocusedSession {
                 $hPid   = [uint32]0
                 [void][LatexPopup.Native]::GetWindowThreadProcessId($h, [ref]$hPid)
                 $isFg = ($h -eq $fgHwnd)
-                if ($isFg) {
-                    Log "  WT[fg] HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle'"
-                    continue
-                }
                 $names = Get-WtAllTabNames -wtHwnd $h
                 $sample = ($names | Select-Object -First 4) -join ' | '
-                Log "  WT     HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle' tabs=$($names.Count) sample='$sample'"
+                if ($isFg) {
+                    Log "  WT[fg] HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle' tabs=$($names.Count) sample='$sample'"
+                } else {
+                    Log "  WT     HWND=0x$([Convert]::ToString([int64]$h, 16)) PID=$hPid title='$hTitle' tabs=$($names.Count) sample='$sample'"
+                }
                 foreach ($n in $names) {
-                    if ($n) { [void]$otherList.Add($n) }
+                    if (-not $n) { continue }
+                    # Skip the selected tab in the focused window so the
+                    # exclusion set captures every WT tab EXCEPT the one we
+                    # are trying to match. Matching by exact name is not
+                    # bulletproof when two tabs share a title, but it is
+                    # close enough; the title-match step above is the
+                    # primary signal.
+                    if ($isFg -and $wtTabName -and ($n -eq $wtTabName)) { continue }
+                    [void]$otherList.Add($n)
                 }
             }
             $wtOtherTabs = $otherList.ToArray()
-            Log "WT other-window tab names: count=$($wtOtherTabs.Count)"
+            Log "WT non-selected tab names: count=$($wtOtherTabs.Count)"
         } catch { Log "Enumerate WT windows threw: $_" }
     }
 
@@ -622,6 +630,11 @@ function Find-FocusedSession {
 
 # ---------- Main ----------
 
+# Adapters can set this to abort cleanly (no popup, no MessageBox) when the
+# focused tab cannot be disambiguated to a single chat. Distinct from
+# "no candidates found" which still falls back to global-newest.
+$script:adapterAborted = $false
+
 $pick    = Find-FocusedSession
 $session = $null
 $pickedAdapter = $null
@@ -630,7 +643,7 @@ if ($pick) {
     $pickedAdapter = $pick.Adapter
 }
 
-if (-not $session) {
+if (-not $session -and -not $script:adapterAborted) {
     Log "FOCUSED detection failed -- using GLOBAL newest fallback (Claude projects only)"
     $session = Get-ChildItem -Path $ProjectsRoot -Filter *.jsonl -Recurse -File `
         -ErrorAction SilentlyContinue |
@@ -646,6 +659,15 @@ if (-not $session) {
         # parse through the claude-code adapter.
         $pickedAdapter = $script:Adapters | Where-Object { $_.Name -eq 'claude-code' } | Select-Object -First 1
     }
+}
+
+if ($script:adapterAborted) {
+    Log "Adapter aborted: focused tab cannot be disambiguated; no popup"
+    Flush-Log
+    if ($Diagnose) {
+        Start-Process notepad.exe -ArgumentList $logPath | Out-Null
+    }
+    return
 }
 
 if (-not $session) { Fail 'No session transcripts found.' }
@@ -824,7 +846,16 @@ public static int CloseTeXpopMsedgeWindows(string substr) {
         "--user-data-dir=$userDataDir",
         '--no-first-run',
         '--no-default-browser-check',
-        '--disable-features=Translate'
+        '--disable-features=Translate',
+        # Edge --app windows that start without foreground focus get their
+        # renderer throttled by Chromium's power-saving heuristics: the
+        # initial paint can be deferred until the user clicks the window,
+        # leaving the popup blank until interaction. These flags disable
+        # the three throttling paths that cause the symptom -- safe for a
+        # short-lived, hotkey-driven popup with one document.
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows'
     )
     if ($null -ne $winX -and $null -ne $winY) {
         $edgeArgs += "--window-position=$winX,$winY"

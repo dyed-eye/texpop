@@ -260,15 +260,53 @@ $claudeFindFocused = {
     }
     Log "Candidate project dirs: $($projectDirs.Count)"
 
-    # Build a per-jsonl exclusion set from other WT windows' tab names. WT
-    # multiplexes all windows under one WindowsTerminal.exe process so the
-    # process-tree walk above pulls in claude.exe descendants from every
-    # window at once; any jsonl whose ai-title equals a tab title in an
-    # *unfocused* WT window almost certainly belongs to that other window
-    # and should be skipped by the newest-jsonl fallback below. The
-    # title-match step still runs without exclusion -- an exact ai-title
-    # match against the foreground title is a stronger signal than any
-    # window-scope heuristic.
+    # Enumerate ALL claude.exe processes globally and resolve their cwds
+    # to project dirs. The WT-descendant BFS misses orphaned claudes
+    # (parent cmd.exe died, PID recycled) or claudes launched via
+    # detaching mechanisms; those still belong to a focused tab whose UI
+    # the user is looking at, so we want them as candidates. The
+    # 'descendant' set stays as the primary, more-trusted list; the
+    # 'global' superset is consulted only when the primary fails.
+    $globalProjectDirs = [System.Collections.Generic.List[string]]::new()
+    foreach ($pd in $projectDirs) { [void]$globalProjectDirs.Add($pd) }
+    try {
+        $globalClaudes = Get-CimInstance Win32_Process -Filter "Name='claude.exe'" `
+            -Property ProcessId, ParentProcessId, Name -ErrorAction Stop
+        if ($globalClaudes) {
+            $candidatePids = @{}
+            foreach ($cc in $claudeCandidates) { $candidatePids[[int]$cc.ProcessId] = $true }
+            $orphanCount = 0
+            foreach ($g in $globalClaudes) {
+                $gPid = [int]$g.ProcessId
+                if ($candidatePids.ContainsKey($gPid)) { continue }
+                $gCwd = $null
+                try { $gCwd = [LatexPopup.Native]::GetProcessCwd($gPid) } catch { }
+                Log "  global-only claude pid=$gPid ppid=$($g.ParentProcessId) cwd='$gCwd' (NOT in WT descendant tree)"
+                $orphanCount++
+                if ($gCwd) {
+                    $gPd = Resolve-ClaudeProjectDirForCwd -cwd $gCwd -projectsRoot $projectsRoot
+                    if ($gPd -and (-not $globalProjectDirs.Contains($gPd))) {
+                        [void]$globalProjectDirs.Add($gPd)
+                    }
+                }
+            }
+            if ($orphanCount -eq 0) {
+                Log "  global claude.exe count matches descendant tree (no orphans)"
+            } else {
+                Log "  $orphanCount claude.exe NOT in WT descendant tree; total project dirs (descendant + orphan): $($globalProjectDirs.Count)"
+            }
+        }
+    } catch { Log "  Global claude.exe enumeration failed: $_" }
+
+    # Build a per-jsonl exclusion set from non-selected WT tab names (both
+    # in the focused window and in any other WT windows). WT multiplexes
+    # all windows under one WindowsTerminal.exe process so the process-tree
+    # walk above pulls in claude.exe descendants from every tab at once;
+    # any jsonl whose ai-title equals the title of a non-selected tab
+    # almost certainly belongs to that other tab and should be skipped by
+    # the newest-jsonl fallback below. The title-match step still runs
+    # without exclusion -- an exact ai-title match against the foreground
+    # title is a stronger signal than any tab-scope heuristic.
     $excludedJsonls = @{}
     if ($wtOtherTabs -and $wtOtherTabs.Count -gt 0 -and $projectDirs.Count -gt 0) {
         $otherNorm = @{}
@@ -289,17 +327,76 @@ $claudeFindFocused = {
                     }
                 }
             }
-            Log "Window-scope exclusion: $($excludedJsonls.Count) jsonl(s) match other WT windows' tabs"
+            Log "Tab-scope exclusion: $($excludedJsonls.Count) jsonl(s) match non-selected WT tab titles"
         }
     }
 
-    # PRIMARY signal: match the WT/window title against ai-title in candidate jsonls.
+    # PRIMARY signal: match the WT/window title against ai-title.
+    # Pass 1 -- only the descendant-tree project dirs (more trusted).
+    # Pass 2 -- the global superset (catches orphan claudes whose
+    #           parent chain doesn't reach WT). Only consulted when pass 1
+    #           finds nothing, and only when global adds dirs over pass 1.
     $titleSources = @()
     if ($foregroundTitle) { $titleSources += $foregroundTitle }
     if ($wtTabName -and ($wtTabName -ne $foregroundTitle)) { $titleSources += $wtTabName }
     foreach ($t in $titleSources) {
         $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $projectDirs
         if ($match) { return $match }
+    }
+    if ($globalProjectDirs.Count -gt $projectDirs.Count) {
+        foreach ($t in $titleSources) {
+            $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $globalProjectDirs
+            if ($match) {
+                Log "Title-match via global enum (orphan claude): $($match.FullName)"
+                return $match
+            }
+        }
+    }
+
+    # Segment-match fallback: when the tab title was manually renamed to a
+    # short label (e.g. "alpha" for a tab whose claude runs in
+    # C:\proj\some-alpha), the title won't match any aiTitle but it often
+    # matches a single path segment of one project dir name. We only
+    # accept a UNIQUE match across all active project dirs; ambiguous
+    # multi-match falls through to the refuse gate.
+    $titleNormForSegment = $null
+    if ($wtTabName) { $titleNormForSegment = Normalize-ClaudeTitle $wtTabName }
+    if (-not $titleNormForSegment -and $foregroundTitle) {
+        $titleNormForSegment = Normalize-ClaudeTitle $foregroundTitle
+    }
+    if ($titleNormForSegment) {
+        $segmentMatches = [System.Collections.Generic.List[string]]::new()
+        foreach ($pd in $globalProjectDirs) {
+            $leaf = Split-Path $pd -Leaf
+            $segments = ($leaf.ToLower() -split '-') | Where-Object { $_ }
+            if ($segments -contains $titleNormForSegment) {
+                [void]$segmentMatches.Add($pd)
+            }
+        }
+        Log "Segment-match: title='$titleNormForSegment' matched $($segmentMatches.Count) of $($globalProjectDirs.Count) project dir(s)"
+        if ($segmentMatches.Count -eq 1) {
+            $picked = Find-ClaudeNewestJsonl -projectDir $segmentMatches[0]
+            if ($picked) {
+                Log "Segment-match picked: $($picked.FullName)"
+                return $picked
+            }
+        } elseif ($segmentMatches.Count -gt 1) {
+            Log "Segment-match ambiguous, not using"
+        }
+    }
+
+    # Safety gate: when Windows Terminal is foreground AND multiple
+    # distinct Claude project dirs are running (descendant + orphan),
+    # the mtime fallback is just a guess across unrelated chats. A user
+    # who renames a WT tab manually (overriding aiTitle) deliberately
+    # breaks the title-match channel; in that case the right answer is
+    # "do not open a popup" rather than show whichever chat happens to
+    # have the newest write. The flag tells show.ps1's main to skip the
+    # global-newest fallback too.
+    if ($wtTabName -and $globalProjectDirs.Count -gt 1) {
+        Log "Refusing fallback: WT context with $($globalProjectDirs.Count) candidate project dirs (descendant + orphan) and no title/segment match"
+        $script:adapterAborted = $true
+        return $null
     }
 
     # Fallback: newest jsonl across candidate project dirs, excluding any
@@ -311,7 +408,7 @@ $claudeFindFocused = {
             -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending
         foreach ($j in $jsonls) {
             if ($excludedJsonls.ContainsKey($j.FullName)) {
-                Log "  fallback skip (other-window): $($j.Name) in $($pd | Split-Path -Leaf)"
+                Log "  fallback skip (other-tab): $($j.Name) in $($pd | Split-Path -Leaf)"
                 continue
             }
             if (-not $best -or $j.LastWriteTime -gt $best.LastWriteTime) {
