@@ -13,7 +13,13 @@
     --accent: #7aa2f7;
     --code-bg: #16161e;
     --border: #2a2e42;
+    --callout-note: #9ece6a;
+    --callout-warn: #f7bb6c;
+    --callout-danger: #f7768e;
   }
+  /* Theme block injected by show.ps1 from Claude Code's selected theme.
+     Linux/popup.py substitutes this with empty string -> defaults above apply. */
+  THEME_CSS_PLACEHOLDER
   html, body {
     margin: 0;
     padding: 0;
@@ -77,16 +83,21 @@
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
   ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-  /* ---------- Callouts (Insight / Note / Tip / Warning / etc.) ---------- */
+  /* ---------- Callouts (Insight / Note / Tip / Warning / etc.) ----------
+     Every callout reads var(--accent) for its color. Type-specific blocks
+     (warning/note/danger) just locally override --accent, and the rules
+     below propagate the change to every stripe/dot/glow. Backgrounds mix
+     toward var(--bg) so they stay legible on both dark and light themes;
+     borders and glows mix toward transparent so they sit naturally on
+     whatever surface is behind the callout. */
   .callout {
     margin: 18px 0;
     padding: 14px 20px 16px;
     border-radius: 10px;
     background: linear-gradient(135deg,
-                  rgba(122, 162, 247, 0.08),
-                  rgba(187, 154, 247, 0.04) 60%,
-                  rgba(122, 162, 247, 0.02));
-    border: 1px solid rgba(122, 162, 247, 0.20);
+                  color-mix(in srgb, var(--accent) 10%, var(--bg)),
+                  color-mix(in srgb, var(--accent) 3%,  var(--bg)));
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22),
                 inset 0 1px 0 rgba(255, 255, 255, 0.02);
     position: relative;
@@ -110,78 +121,26 @@
     height: 8px;
     border-radius: 50%;
     background: var(--accent);
-    box-shadow: 0 0 0 4px rgba(122, 162, 247, 0.18),
-                0 0 12px rgba(122, 162, 247, 0.55);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent),
+                0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
   }
   .callout-label::after {
     content: "";
     flex: 1;
     height: 1px;
     background: linear-gradient(90deg,
-                  rgba(122, 162, 247, 0.55),
-                  rgba(122, 162, 247, 0.0));
+                  color-mix(in srgb, var(--accent) 55%, transparent),
+                  transparent);
   }
   .callout-body { color: var(--fg); }
   .callout-body > p:first-child { margin-top: 0; }
   .callout-body > p:last-child  { margin-bottom: 0; }
 
-  /* Type-specific palettes (auto-applied via JS class). */
-  .callout-warning, .callout-caution, .callout-warn {
-    border-color: rgba(247, 187, 108, 0.32);
-    background: linear-gradient(135deg, rgba(247,187,108,0.10), rgba(247,187,108,0.02));
-  }
-  .callout-warning .callout-label,
-  .callout-caution .callout-label,
-  .callout-warn    .callout-label { color: #f7bb6c; }
-  .callout-warning .callout-label::before,
-  .callout-caution .callout-label::before,
-  .callout-warn    .callout-label::before {
-    background: #f7bb6c;
-    box-shadow: 0 0 0 4px rgba(247,187,108,0.20),
-                0 0 12px rgba(247,187,108,0.55);
-  }
-  .callout-warning .callout-label::after,
-  .callout-caution .callout-label::after,
-  .callout-warn    .callout-label::after {
-    background: linear-gradient(90deg, rgba(247,187,108,0.55), transparent);
-  }
-
-  .callout-tip, .callout-note, .callout-key-takeaway {
-    border-color: rgba(158, 206, 106, 0.32);
-    background: linear-gradient(135deg, rgba(158,206,106,0.09), rgba(158,206,106,0.02));
-  }
-  .callout-tip  .callout-label,
-  .callout-note .callout-label,
-  .callout-key-takeaway .callout-label { color: #9ece6a; }
-  .callout-tip  .callout-label::before,
-  .callout-note .callout-label::before,
-  .callout-key-takeaway .callout-label::before {
-    background: #9ece6a;
-    box-shadow: 0 0 0 4px rgba(158,206,106,0.20),
-                0 0 12px rgba(158,206,106,0.55);
-  }
-  .callout-tip  .callout-label::after,
-  .callout-note .callout-label::after,
-  .callout-key-takeaway .callout-label::after {
-    background: linear-gradient(90deg, rgba(158,206,106,0.55), transparent);
-  }
-
-  .callout-danger, .callout-error {
-    border-color: rgba(247, 118, 142, 0.32);
-    background: linear-gradient(135deg, rgba(247,118,142,0.09), rgba(247,118,142,0.02));
-  }
-  .callout-danger .callout-label,
-  .callout-error  .callout-label { color: #f7768e; }
-  .callout-danger .callout-label::before,
-  .callout-error  .callout-label::before {
-    background: #f7768e;
-    box-shadow: 0 0 0 4px rgba(247,118,142,0.22),
-                0 0 12px rgba(247,118,142,0.55);
-  }
-  .callout-danger .callout-label::after,
-  .callout-error  .callout-label::after {
-    background: linear-gradient(90deg, rgba(247,118,142,0.55), transparent);
-  }
+  /* Type-specific palettes: redefine --accent in scope; the rules above
+     pick it up automatically via CSS custom-property inheritance. */
+  .callout-warning, .callout-caution, .callout-warn        { --accent: var(--callout-warn); }
+  .callout-tip, .callout-note, .callout-key-takeaway       { --accent: var(--callout-note); }
+  .callout-danger, .callout-error                          { --accent: var(--callout-danger); }
 </style>
 </head>
 <body>

@@ -90,6 +90,152 @@ if (-not (Test-Path $template))     { Fail "template.html not found at $template
 if (-not (Test-Path $vendor))       { Fail "vendor/ missing -- run setup.ps1 first" }
 if (-not (Test-Path $ProjectsRoot)) { Fail "Projects root not found: $ProjectsRoot" }
 
+# ---------- Theme inheritance from Claude Code ----------
+#
+# Reads ~/.claude/settings.json to discover the user's selected theme, then
+# loads the matching custom theme JSON (or falls back to a built-in light/dark
+# palette). The result is a CSS :root block that overrides template.html's
+# default Tokyo Night palette so the popup matches the terminal chrome.
+#
+# Hard failures (missing file, bad JSON) return $null and the popup keeps
+# its default palette. Never throws.
+
+$script:HexColorRe = '^#[0-9a-fA-F]{3,8}$'
+
+function Resolve-ClaudeTheme {
+    $settingsPath = Join-Path $env:USERPROFILE '.claude\settings.json'
+    if (-not (Test-Path -LiteralPath $settingsPath -PathType Leaf)) {
+        Log "Theme: settings.json not found at $settingsPath"
+        return $null
+    }
+    $settings = $null
+    try {
+        $settings = Get-Content -LiteralPath $settingsPath -Raw -Encoding UTF8 |
+                    ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Log "Theme: settings.json parse failed: $_"
+        return $null
+    }
+    $themeName = $settings.theme
+    if (-not $themeName) {
+        Log "Theme: no .theme key in settings.json"
+        return $null
+    }
+    Log "Theme: setting='$themeName'"
+
+    if ($themeName -like 'custom:*') {
+        $name = $themeName.Substring('custom:'.Length)
+        # Defense-in-depth: reject anything that could escape the themes dir.
+        # Legitimate Claude Code theme names are simple slugs (kanagawa-dragon,
+        # solarized-light). Path separators or '..' indicate either a typo
+        # or a same-user attacker rewriting settings.json to make us
+        # Get-Content an arbitrary user-readable file. JSON parse would fail
+        # anyway, but stopping here is cleaner.
+        if ($name -match '[\\/]|\.\.') {
+            Log "Theme: rejected custom theme name with path separator or '..': '$name'"
+            return $null
+        }
+        $themeFile = Join-Path $env:USERPROFILE ".claude\themes\$name.json"
+        if (-not (Test-Path -LiteralPath $themeFile -PathType Leaf)) {
+            Log "Theme: custom theme file not found: $themeFile"
+            return $null
+        }
+        try {
+            $themeJson = Get-Content -LiteralPath $themeFile -Raw -Encoding UTF8 |
+                         ConvertFrom-Json -ErrorAction Stop
+        } catch {
+            Log "Theme: custom theme JSON parse failed: $_"
+            return $null
+        }
+        $overrides = $themeJson.overrides
+        if (-not $overrides) {
+            Log "Theme: custom theme has no .overrides block"
+            return $null
+        }
+        # PSCustomObject -> hashtable so ContainsKey/[] work consistently.
+        $h = @{}
+        foreach ($p in $overrides.PSObject.Properties) {
+            $h[$p.Name] = [string]$p.Value
+        }
+        Log "Theme: loaded custom '$name' with $($h.Count) overrides"
+        return $h
+    }
+
+    # Built-in theme: light/dark heuristic from the name substring.
+    $isLight = ($themeName -match 'light')
+    if ($isLight) {
+        Log "Theme: built-in (light heuristic)"
+        return @{
+            background                 = '#fdf6e3'
+            text                       = '#586e75'
+            subtle                     = '#93a1a1'
+            claude                     = '#268bd2'
+            bashMessageBackgroundColor = '#eee8d5'
+            messageActionsBackground   = '#d8d2bf'
+            success                    = '#859900'
+            warning                    = '#b58900'
+            error                      = '#dc322f'
+        }
+    }
+    Log "Theme: built-in (dark heuristic)"
+    return @{
+        background                 = '#1a1b26'
+        text                       = '#c0caf5'
+        subtle                     = '#565f89'
+        claude                     = '#7aa2f7'
+        bashMessageBackgroundColor = '#16161e'
+        messageActionsBackground   = '#2a2e42'
+        success                    = '#9ece6a'
+        warning                    = '#f7bb6c'
+        error                      = '#f7768e'
+    }
+}
+
+function Get-OverrideColor {
+    # Walks the priority list of keys against the overrides hashtable,
+    # returns the first value that looks like a valid CSS hex color.
+    # Falls back to $fallback if none match. The hex-validate step
+    # rejects anything that could escape the CSS var context (e.g. a
+    # malformed theme entry containing "; } body { ...").
+    param($overrides, [string[]]$keys, [string]$fallback)
+    if ($null -eq $overrides) { return $fallback }
+    foreach ($k in $keys) {
+        if (-not $overrides.ContainsKey($k)) { continue }
+        $v = [string]$overrides[$k]
+        if (-not $v) { continue }
+        $v = $v.Trim()
+        if ($v -match $script:HexColorRe) { return $v }
+    }
+    return $fallback
+}
+
+function Build-ThemeCss {
+    # Returns a CSS :root { ... } block string. Always returns valid CSS;
+    # on $null overrides emits the Tokyo Night defaults that match the
+    # template's own :root block (no-op visually but keeps shape consistent).
+    param($overrides)
+
+    $colors = [ordered]@{
+        '--bg'             = Get-OverrideColor $overrides @('background')                  '#1a1b26'
+        '--fg'             = Get-OverrideColor $overrides @('text')                        '#c0caf5'
+        '--muted'          = Get-OverrideColor $overrides @('subtle','inactive')           '#565f89'
+        '--accent'         = Get-OverrideColor $overrides @('claude','professionalBlue')   '#7aa2f7'
+        '--code-bg'        = Get-OverrideColor $overrides @('bashMessageBackgroundColor')  '#16161e'
+        '--border'         = Get-OverrideColor $overrides @('messageActionsBackground')    '#2a2e42'
+        '--callout-note'   = Get-OverrideColor $overrides @('success')                     '#9ece6a'
+        '--callout-warn'   = Get-OverrideColor $overrides @('warning')                     '#f7bb6c'
+        '--callout-danger' = Get-OverrideColor $overrides @('error')                       '#f7768e'
+    }
+
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine(':root {')
+    foreach ($k in $colors.Keys) {
+        [void]$sb.AppendLine(("    {0}: {1};" -f $k, $colors[$k]))
+    }
+    [void]$sb.AppendLine('}')
+    return $sb.ToString()
+}
+
 # ---------- P/Invoke: foreground PID + PEB CWD reader (x64) ----------
 
 if (-not ('LatexPopup.Native' -as [type])) {
@@ -724,6 +870,17 @@ if (-not $resolvedIcon) {
 $tpl = $tpl.Replace('ASSETS_BASE/icon.svg', $resolvedIcon)
 $tpl = $tpl.Replace('VENDOR_BASE', $vendorUri)
 $tpl = $tpl.Replace('ASSETS_BASE', $assetsUri)
+# Theme inheritance from Claude Code's selected theme. Resolution is best-effort:
+# on any failure Build-ThemeCss emits the default Tokyo Night palette so the
+# popup is never broken by a missing/malformed settings.json.
+$themeOverrides = $null
+try { $themeOverrides = Resolve-ClaudeTheme } catch { Log "Theme: Resolve-ClaudeTheme threw: $_" }
+# Empty-string fallback matches popup.py (Linux): on a thrown error here, the
+# template's own :root block stays the sole palette source. Anything else
+# would risk shadowing the defaults with a malformed/partial override block.
+$themeCss = ''
+try { $themeCss = Build-ThemeCss $themeOverrides } catch { Log "Theme: Build-ThemeCss threw: $_" }
+$tpl = $tpl.Replace('THEME_CSS_PLACEHOLDER', $themeCss)
 # JSON data island: template.html uses <script type='application/json'> for
 # the message payload and parses via JSON.parse. We produce a JSON-encoded
 # string, then defensively escape any </ as <\/ so that no literal '</script'

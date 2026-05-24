@@ -49,6 +49,12 @@ def write_html(root: Path, message: str) -> Path:
     html = html.replace("ASSETS_BASE/icon.svg", icon_uri(root))
     html = html.replace("VENDOR_BASE", file_uri(vendor).rstrip("/"))
     html = html.replace("ASSETS_BASE", file_uri(root / "assets").rstrip("/"))
+    # Theme inheritance is Windows-only for now; on Linux the placeholder
+    # is replaced with empty string and the template's default :root block
+    # (Tokyo Night) remains the only palette in effect.
+    if "THEME_CSS_PLACEHOLDER" not in html:
+        raise RuntimeError("THEME_CSS_PLACEHOLDER missing from template.html")
+    html = html.replace("THEME_CSS_PLACEHOLDER", "")
     if "MESSAGE_PLACEHOLDER" not in html:
         raise RuntimeError("MESSAGE_PLACEHOLDER missing from template.html")
     html = html.replace("MESSAGE_PLACEHOLDER", json.dumps(message).replace("</", "<\\/"))
