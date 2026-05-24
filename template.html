@@ -86,13 +86,17 @@
     user-select: none;
     transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
   }
-  .copy-btn:hover { color: var(--accent); background: #232844; border-color: var(--accent); }
+  .copy-btn:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+    border-color: var(--accent);
+  }
   .copy-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .copy-btn svg { width: 14px; height: 14px; pointer-events: none; }
   .copy-btn.copied {
-    color: #9ece6a;
-    border-color: #9ece6a;
-    background: #1f2a1d;
+    color: var(--callout-note);
+    border-color: var(--callout-note);
+    background: color-mix(in srgb, var(--callout-note) 15%, var(--bg));
   }
   .katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; }
   .katex { font-size: 1.05em; }
