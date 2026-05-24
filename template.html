@@ -135,6 +135,10 @@
   .callout-body { color: var(--fg); }
   .callout-body > p:first-child { margin-top: 0; }
   .callout-body > p:last-child  { margin-bottom: 0; }
+  /* Tables inside callouts: use the popup's main bg so the table reads as
+     a neutral panel against the callout's tint instead of <td> showing the
+     tint through its transparent default. */
+  .callout th, .callout td { background: var(--bg); }
 
   /* Type-specific palettes: redefine --accent in scope; the rules above
      pick it up automatically via CSS custom-property inheritance. */
