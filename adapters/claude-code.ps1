@@ -191,6 +191,77 @@ function Normalize-ClaudeTitle {
     return (($t -replace '^[\W_]+', '').Trim().ToLower())
 }
 
+# Parse a --resume <UUID> argument from a claude.exe command line. The UUID
+# is the canonical session identifier set by Claude itself and remains
+# reliable when WT tab title and aiTitle diverge (e.g. after branching, or
+# when Claude sets tab titles from a separate signal like project name).
+function Get-ClaudeResumeUuid {
+    param([string]$cmd)
+    if (-not $cmd) { return $null }
+    $m = [regex]::Match($cmd, '(?i)--resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')
+    if ($m.Success) { return $m.Groups[1].Value.ToLower() }
+    return $null
+}
+
+# Walk the fork chain from $baseJsonl down to the most recently-written
+# descendant. Branching in Claude Code creates a new jsonl whose first line
+# carries {"forkedFrom":{"sessionId":"<parent>",...}} and a fresh sessionId.
+# The original claude.exe process still has --resume <parent> in its cmdline,
+# so UUID-match correctly identifies the chat but stops at the pre-branch
+# transcript. This walks the chain forward: at each node pick the freshest
+# child whose forkedFrom points back at the current sessionId, recurse until
+# no more children exist.
+function Resolve-ClaudeForkLeaf {
+    param([System.IO.FileInfo]$baseJsonl, [string]$projectDir)
+    $siblings = Get-ChildItem -Path $projectDir -Filter '*.jsonl' -File `
+        -ErrorAction SilentlyContinue
+    if (-not $siblings -or $siblings.Count -le 1) { return $baseJsonl }
+
+    # Build (parent sessionId) -> List[child FileInfo] by reading first line
+    # of each sibling. Cheap: one line per file.
+    $childMap = @{}
+    foreach ($s in $siblings) {
+        try {
+            $first = Get-Content -LiteralPath $s.FullName -TotalCount 1 -ErrorAction Stop
+            if (-not $first) { continue }
+            $obj = $first | ConvertFrom-Json -ErrorAction Stop
+            if ($obj.forkedFrom -and $obj.forkedFrom.sessionId) {
+                $parent = [string]$obj.forkedFrom.sessionId
+                if (-not $childMap.ContainsKey($parent)) {
+                    $childMap[$parent] = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+                }
+                [void]$childMap[$parent].Add($s)
+            }
+        } catch { }
+    }
+    if ($childMap.Count -eq 0) { return $baseJsonl }
+
+    # Walk down from base. At each step, follow the freshest child by mtime.
+    # Loop guard via visited set in case the on-disk graph contains a cycle.
+    $current = $baseJsonl
+    $visited = @{}
+    while ($true) {
+        $sid = [System.IO.Path]::GetFileNameWithoutExtension($current.Name)
+        if ($visited.ContainsKey($sid)) { break }
+        $visited[$sid] = $true
+        if (-not $childMap.ContainsKey($sid)) { break }
+        $children = $childMap[$sid]
+        if (-not $children -or $children.Count -eq 0) { break }
+        $next = $children | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $next) { break }
+        # Only descend if the child has been written to MORE recently than
+        # the current node. Otherwise the user has /resume'd back into the
+        # parent and the child branch is now stale -- stop here.
+        if ($next.LastWriteTime -le $current.LastWriteTime) {
+            Log "  Fork-chain: stop at $sid (newest child $($next.BaseName) mtime=$($next.LastWriteTime) <= current mtime=$($current.LastWriteTime))"
+            break
+        }
+        Log "  Fork-chain: $sid -> $($next.BaseName) (mtime=$($next.LastWriteTime))"
+        $current = $next
+    }
+    return $current
+}
+
 function Find-ClaudeSessionByTitle {
     param([string]$targetTitle, $projectDirs)
     $norm = Normalize-ClaudeTitle $targetTitle
@@ -247,8 +318,11 @@ $claudeFindFocused = {
     }
     if (-not $claudeCandidates) { return $null }
 
-    # Collect unique project dirs from candidate CWDs.
+    # Collect unique project dirs from candidate CWDs. Cache per-candidate
+    # context (cwd, project dir, --resume UUID) so the UUID-match pass below
+    # doesn't have to re-read PEBs.
     $projectDirs = [System.Collections.Generic.List[string]]::new()
+    $candidateCtx = [System.Collections.Generic.List[hashtable]]::new()
     foreach ($c in $claudeCandidates) {
         $cwd = $null
         try { $cwd = [LatexPopup.Native]::GetProcessCwd([int]$c.ProcessId) } catch { Log "  PEB read pid=$($c.ProcessId) threw: $_" }
@@ -257,6 +331,8 @@ $claudeFindFocused = {
         $pd = Resolve-ClaudeProjectDirForCwd -cwd $cwd -projectsRoot $projectsRoot
         if (-not $pd) { continue }
         if (-not $projectDirs.Contains($pd)) { [void]$projectDirs.Add($pd) }
+        $uuid = Get-ClaudeResumeUuid $c.CommandLine
+        [void]$candidateCtx.Add(@{ Pid = $c.ProcessId; Cwd = $cwd; ProjectDir = $pd; Uuid = $uuid })
     }
     Log "Candidate project dirs: $($projectDirs.Count)"
 
@@ -329,6 +405,48 @@ $claudeFindFocused = {
             }
             Log "Tab-scope exclusion: $($excludedJsonls.Count) jsonl(s) match non-selected WT tab titles"
         }
+    }
+
+    # UUID-from-cmdline match: each candidate's --resume <UUID> arg is the
+    # canonical session identifier set by Claude itself. This survives the
+    # divergence between WT tab title and aiTitle that occurs after session
+    # branching, or when Claude derives tab titles from a separate signal
+    # (project name vs LLM summary). Map UUIDs to their jsonl files in the
+    # corresponding project dirs, drop any excluded by other-tab matching,
+    # and pick if exactly one remains. Only consults the descendant tree --
+    # orphan claudes (parent chain broken) are still handled by the title /
+    # segment / mtime passes below.
+    $uuidMatches = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
+    foreach ($ctx in $candidateCtx) {
+        if (-not $ctx.Uuid) { continue }
+        $jsonlPath = Join-Path $ctx.ProjectDir "$($ctx.Uuid).jsonl"
+        if (-not (Test-Path -LiteralPath $jsonlPath)) {
+            Log "  UUID-match skip (jsonl missing): pid=$($ctx.Pid) uuid=$($ctx.Uuid)"
+            continue
+        }
+        if ($excludedJsonls.ContainsKey($jsonlPath)) {
+            Log "  UUID-match skip (other-tab exclusion): pid=$($ctx.Pid) uuid=$($ctx.Uuid)"
+            continue
+        }
+        $jsonl = Get-Item -LiteralPath $jsonlPath -ErrorAction SilentlyContinue
+        if ($jsonl) {
+            Log "  UUID-match candidate: pid=$($ctx.Pid) -> $($jsonl.Name)"
+            [void]$uuidMatches.Add($jsonl)
+        }
+    }
+    Log "UUID-match: $($uuidMatches.Count) candidate(s) from --resume args"
+    if ($uuidMatches.Count -eq 1) {
+        $picked  = $uuidMatches[0]
+        $pickDir = Split-Path -Parent $picked.FullName
+        $leaf    = Resolve-ClaudeForkLeaf -baseJsonl $picked -projectDir $pickDir
+        if ($leaf -and $leaf.FullName -ne $picked.FullName) {
+            Log "UUID-match picked (fork leaf): $($leaf.FullName)"
+            return $leaf
+        }
+        Log "UUID-match picked: $($picked.FullName)"
+        return $picked
+    } elseif ($uuidMatches.Count -gt 1) {
+        Log "UUID-match ambiguous (multiple --resume candidates remain after tab exclusion), falling through"
     }
 
     # PRIMARY signal: match the WT/window title against ai-title.
