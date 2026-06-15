@@ -29,7 +29,13 @@ param(
     [int]$Width  = 720,
     [int]$Height = 540,
     [switch]$KeepOpenOnError,
-    [switch]$Diagnose
+    [switch]$Diagnose,
+    # Detection-only mode. Runs the full focused-chat detection cascade, then
+    # writes a compact JSON line {session, adapter, rect, dpi, themeCss} to
+    # stdout and returns WITHOUT rendering or launching Edge. Used by stream.ps1
+    # to reuse detection without duplicating it. Failures emit JSON ({error} /
+    # {aborted}) instead of a MessageBox so the caller can branch on them.
+    [switch]$ResolveOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,6 +82,13 @@ $script:fgRectAtStart = $null
 function Fail($msg) {
     Log "FAIL: $msg"
     Flush-Log
+    # In -ResolveOnly mode stdout IS the return channel (the caller captures it),
+    # so report failures as JSON there rather than via a MessageBox the caller
+    # can't see or dismiss.
+    if ($ResolveOnly) {
+        [Console]::Out.WriteLine((ConvertTo-Json @{ error = $msg } -Compress))
+        exit 1
+    }
     # show.ps1 runs with -WindowStyle Hidden so console output is invisible.
     # Surface failures via MessageBox; users can also open the debug log.
     try {
@@ -86,8 +99,12 @@ function Fail($msg) {
     exit 1
 }
 
-if (-not (Test-Path $template))     { Fail "template.html not found at $template" }
-if (-not (Test-Path $vendor))       { Fail "vendor/ missing -- run setup.ps1 first" }
+# Template + vendor are only needed for the render/Edge path, which -ResolveOnly
+# never reaches; skip those checks so detection still works on a partial checkout.
+if (-not $ResolveOnly) {
+    if (-not (Test-Path $template)) { Fail "template.html not found at $template" }
+    if (-not (Test-Path $vendor))   { Fail "vendor/ missing -- run setup.ps1 first" }
+}
 if (-not (Test-Path $ProjectsRoot)) { Fail "Projects root not found: $ProjectsRoot" }
 
 # ---------- Theme inheritance from Claude Code ----------
@@ -810,6 +827,10 @@ if (-not $session -and -not $script:adapterAborted) {
 if ($script:adapterAborted) {
     Log "Adapter aborted: focused tab cannot be disambiguated; no popup"
     Flush-Log
+    if ($ResolveOnly) {
+        [Console]::Out.WriteLine((ConvertTo-Json @{ aborted = $true } -Compress))
+        return
+    }
     if ($Diagnose) {
         Start-Process notepad.exe -ArgumentList $logPath | Out-Null
     }
@@ -819,6 +840,37 @@ if ($script:adapterAborted) {
 if (-not $session) { Fail 'No session transcripts found.' }
 if (-not $pickedAdapter) { Fail "Internal: no adapter to parse $($session.Name)" }
 Log "PICKED: $($session.FullName)  (mtime $($session.LastWriteTime))  adapter=$($pickedAdapter.Name)"
+
+if ($ResolveOnly) {
+    # Emit the resolved session + adapter + terminal geometry + theme CSS as the
+    # return value over stdout, then stop. stream.ps1 takes it from here: it owns
+    # the persistent window and re-parses the file itself on each poll.
+    $rectObj = $null
+    if ($script:fgRectAtStart) {
+        $rectObj = @{
+            left   = [int]$script:fgRectAtStart.Left
+            top    = [int]$script:fgRectAtStart.Top
+            right  = [int]$script:fgRectAtStart.Right
+            bottom = [int]$script:fgRectAtStart.Bottom
+        }
+    }
+    $dpiVal = if ($script:fgDpiAtStart) { [int]$script:fgDpiAtStart } else { 96 }
+    $themeCssOut = ''
+    try {
+        $ov = Resolve-ClaudeTheme
+        $themeCssOut = Build-ThemeCss $ov
+    } catch { Log "ResolveOnly: theme resolution threw: $_" }
+    $out = @{
+        session = $session.FullName
+        adapter = $pickedAdapter.Name
+        rect    = $rectObj
+        dpi     = $dpiVal
+        themeCss = $themeCssOut
+    }
+    Flush-Log
+    [Console]::Out.WriteLine((ConvertTo-Json $out -Compress -Depth 4))
+    return
+}
 
 $message = & $pickedAdapter.GetLastAssistantTurn $session
 if ([string]::IsNullOrWhiteSpace($message)) {

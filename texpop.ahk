@@ -3,7 +3,10 @@
 ; Part of texpop (https://github.com/dyed-eye/texpop).
 ;
 ; Hotkeys (active ONLY when a terminal window has focus):
-;   Ctrl + Alt + V           ->  render the focused chat's last message
+;   Ctrl + Alt + V           ->  render the focused chat's last message (one-shot)
+;   Ctrl + Alt + S           ->  stream mode: persistent companion window that
+;                                live-updates as new answers arrive in the chat.
+;                                Press again (in any chat) to re-pin it there.
 ;   Ctrl + Alt + Shift + V   ->  diagnostic-only run; opens debug log in Notepad
 ;
 ; Setup:
@@ -16,7 +19,8 @@
 #Requires AutoHotkey v2.0
 #SingleInstance Force
 
-ShowPs1 := A_ScriptDir "\show.ps1"
+ShowPs1   := A_ScriptDir "\show.ps1"
+StreamPs1 := A_ScriptDir "\stream.ps1"
 
 ; List of process exe names that count as "terminals" for hotkey activation.
 ; Add more here if you use a different terminal (e.g. "wezterm-gui.exe").
@@ -42,6 +46,7 @@ IsTerminalActive() {
 
 #HotIf IsTerminalActive()
 ^!v::TriggerPopup
+^!s::TriggerStream
 ^+!v::TriggerDiagnose
 #HotIf
 
@@ -96,6 +101,30 @@ ActivateLatexPopup(attempt) {
     }
     if (attempt < MAX_ATTEMPTS) {
         SetTimer ActivateLatexPopup.Bind(attempt + 1), -120
+    }
+}
+
+TriggerStream(*) {
+    global StreamPs1
+    if !FileExist(StreamPs1) {
+        MsgBox "stream.ps1 not found at:`n" StreamPs1, "texpop", "Iconx"
+        return
+    }
+    ToolTip "Stream mode..."
+    SetTimer ClearTip, -4000
+
+    ; stream.ps1 is long-lived and positions + focuses its own window (both on
+    ; fresh launch and on re-pin), so -- unlike TriggerPopup -- AHK does not
+    ; poll for the window afterwards. Grant the right to set foreground once so
+    ; the PowerShell child's SetForegroundWindow call is honoured.
+    DllCall("AllowSetForegroundWindow", "uint", 0xFFFFFFFF)
+
+    cmd := 'powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' StreamPs1 '"'
+    try {
+        Run cmd, , "Hide"
+    } catch Any as err {
+        ToolTip
+        MsgBox "Run failed:`n" err.Message, "texpop", "Iconx"
     }
 }
 

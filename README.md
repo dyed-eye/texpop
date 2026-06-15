@@ -58,6 +58,7 @@ If you run Claude Code in a terminal, texpop is the only choice — every other 
 ## Features
 
 - **Hotkey-triggered.** `Ctrl + Alt + V` from any allowlisted terminal, anywhere in your Claude Code session. No menu hunting, no command palette.
+- **Stream mode (Windows).** `Ctrl + Alt + S` opens a *persistent* companion window docked beside your terminal that live-updates as new answers arrive in the focused chat — no re-pressing the hotkey. `←` / `→` step back and forward through the conversation, each question framed above its answer; returning to the newest re-engages live follow. Press the hotkey again to re-pin it to whichever chat is now focused.
 - **Focused-chat detection.** PEB CWD reads + UIAutomation tab name + `ai-title` transcript matching pick the chat you're actually looking at, even with five Claude Code tabs open in Windows Terminal.
 - **DPI-correct overlay.** The popup window matches the terminal's exact pixel rectangle, with per-monitor DPI v2 awareness — drag your terminal between a 100% and 200% display and it still lines up.
 - **KaTeX rendering.** Inline `$...$`, display `$$...$$`, and `\(...\)` / `\[...\]` delimiters all render. Pre-loaded macros for Dirac notation (`\ket`, `\bra`, `\braket`), `\Tr`, blackboard sets (`\R`, `\C`, `\Z`, `\N`), and `\eps`.
@@ -157,15 +158,19 @@ foreground PID API.
 
 | Hotkey | Where | What it does |
 |---|---|---|
-| `Ctrl + Alt + V` | Any allowlisted terminal | Detects the focused Claude Code chat and renders its last assistant message |
+| `Ctrl + Alt + V` | Any allowlisted terminal | Detects the focused Claude Code chat and renders its last assistant message (one-shot overlay) |
+| `Ctrl + Alt + S` | Any allowlisted terminal | **Stream mode (Windows)** — opens/refocuses a persistent companion window that live-updates as the focused chat gets new answers. Press again to re-pin to another chat |
 | `Ctrl + Alt + Shift + V` | Any allowlisted terminal | Diagnostic mode — runs detection without launching the popup, opens `%TEMP%\texpop-debug.log` in Notepad |
-| `Esc` | Inside the popup | Close the popup |
+| `←` / `→` | Inside the stream window | Step to the previous / next exchange; reaching the newest re-engages live follow |
+| `Esc` | Inside either popup | Close the popup |
 
 On Linux, the first two rows are whatever shortcut you bind in the compositor.
 `Esc` closes the native Qt popup. Browser fallback windows depend on the browser
 and window manager, so use the native Qt backend for reliable close behavior.
 
 Typical workflow: you're chatting with Claude Code about a physics or math problem. Claude replies with `\ket{\psi}`, a `$$\hat{H}\ket{\psi} = E\ket{\psi}$$` display equation, and a `* Insight ────` callout summarising the result. In the terminal, that's raw text. Press `Ctrl + Alt + V` and the same reply pops up rendered — properly typeset math, styled callout, syntax-highlighted code blocks. Read it, hit `Esc`, you're back in the terminal. Ask the next question, hit `Ctrl + Alt + V` again to refresh. The popup window is sized and positioned to overlap the terminal exactly, so your eyes don't have to relocate.
+
+**Stream mode (Windows)** trades the one-shot overlay for a window you leave open. Press `Ctrl + Alt + S` and a companion panel docks to the right of the terminal; as you keep chatting, each new answer renders there automatically — you read the typeset reply on the right while you type on the left. `←` / `→` walk back through earlier exchanges (each question shown in a dimmed frame above its answer), and stepping back to the newest resumes live follow. It binds to whatever chat is focused when you press the hotkey; press `Ctrl + Alt + S` again from a different chat to move the window there. Under the hood it serves the render over a loopback-only HTTP server (`127.0.0.1`, random per-session token) so the page can update in place — nothing is exposed to the network.
 
 ---
 

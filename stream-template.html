@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- No external requests exist (all assets are same-origin loopback), but if
+     the transcript contains a link the user clicks, don't leak the token in
+     the Referer header to the destination. -->
+<meta name="referrer" content="no-referrer">
+<title>TeXpop Stream</title>
+<link rel="icon" href="__STREAM_BASE__/favicon.ico">
+<link rel="stylesheet" href="__STREAM_BASE__/vendor/katex/katex.min.css">
+<style>
+  :root {
+    --bg: #1a1b26;
+    --fg: #c0caf5;
+    --muted: #565f89;
+    --accent: #7aa2f7;
+    --code-bg: #16161e;
+    --border: #2a2e42;
+    --callout-note: #9ece6a;
+    --callout-warn: #f7bb6c;
+    --callout-danger: #f7768e;
+  }
+  /* Theme block injected by stream.ps1 from Claude Code's selected theme
+     (same mechanism as the one-shot popup). Empty string -> defaults above. */
+  THEME_CSS_PLACEHOLDER
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
+                 Arial, "Noto Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+  #content {
+    padding: 18px 22px 36px;
+    max-width: 100%;
+    word-wrap: break-word;
+  }
+  /* Each page is one exchange: the question in a dimmed framed box, then the
+     answer below. Uses the inherited Claude Code theme's muted/border tokens. */
+  .prompt-frame {
+    background: color-mix(in srgb, var(--muted) 14%, var(--bg));
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 11px 16px 13px;
+    margin: 2px 0 20px;
+    color: var(--muted);
+  }
+  .prompt-frame::before {
+    content: "You asked";
+    display: block;
+    font-size: 0.7em;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--muted);
+    opacity: 0.85;
+    margin-bottom: 9px;
+  }
+  .prompt-frame > :first-child { margin-top: 0; }
+  .prompt-frame > :last-child  { margin-bottom: 0; }
+  h1, h2, h3, h4 { color: var(--accent); margin: 1.1em 0 0.4em; line-height: 1.25; }
+  h1 { font-size: 1.4em; }
+  h2 { font-size: 1.25em; }
+  h3 { font-size: 1.1em; }
+  p { margin: 0.5em 0; }
+  ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
+  li { margin: 0.15em 0; }
+  blockquote {
+    border-left: 3px solid var(--accent);
+    margin: 0.6em 0;
+    padding: 0.1em 0.9em;
+    color: var(--muted);
+  }
+  hr { border: none; border-top: 1px solid var(--border); margin: 1em 0; }
+  a { color: var(--accent); }
+  code {
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: "Cascadia Code", "Consolas", "Menlo", monospace;
+    font-size: 0.9em;
+  }
+  pre {
+    background: var(--code-bg);
+    padding: 10px 12px;
+    border-radius: 5px;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+  }
+  pre code { background: transparent; padding: 0; font-size: 0.88em; }
+  .code-wrap { position: relative; margin: 0.5em 0; }
+  .code-wrap > pre { margin: 0; }
+  .copy-btn {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--fg);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    user-select: none;
+    transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+  }
+  .copy-btn:hover {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, var(--bg));
+    border-color: var(--accent);
+  }
+  .copy-btn:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  .copy-btn svg { width: 14px; height: 14px; pointer-events: none; }
+  .copy-btn.copied {
+    color: var(--callout-note);
+    border-color: var(--callout-note);
+    background: color-mix(in srgb, var(--callout-note) 15%, var(--bg));
+  }
+  .katex-display { margin: 0.7em 0; overflow-x: auto; overflow-y: hidden; }
+  .katex { font-size: 1.05em; }
+  table { border-collapse: collapse; margin: 0.5em 0; }
+  th, td { border: 1px solid var(--border); padding: 4px 9px; }
+  th { background: var(--code-bg); }
+  #status {
+    position: fixed;
+    bottom: 6px;
+    right: 10px;
+    font-size: 11px;
+    color: var(--muted);
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  #status::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--callout-note);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--callout-note) 70%, transparent);
+  }
+  #status.stale::before { background: var(--callout-warn); box-shadow: none; }
+  #status.down::before  { background: var(--callout-danger); box-shadow: none; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  /* ---------- Callouts (Insight / Note / Tip / Warning / etc.) ----------
+     Identical to the one-shot template: every callout reads var(--accent);
+     type-specific blocks override --accent locally. */
+  .callout {
+    margin: 18px 0;
+    padding: 14px 20px 16px;
+    border-radius: 10px;
+    background: linear-gradient(135deg,
+                  color-mix(in srgb, var(--accent) 10%, var(--bg)),
+                  color-mix(in srgb, var(--accent) 3%,  var(--bg)));
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22),
+                inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    position: relative;
+  }
+  .callout-label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 10px;
+    user-select: none;
+  }
+  .callout-label::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent),
+                0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  }
+  .callout-label::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg,
+                  color-mix(in srgb, var(--accent) 55%, transparent),
+                  transparent);
+  }
+  .callout-body { color: var(--fg); }
+  .callout-body > p:first-child { margin-top: 0; }
+  .callout-body > p:last-child  { margin-bottom: 0; }
+  .callout th, .callout td { background: var(--bg); }
+
+  .callout-warning, .callout-caution, .callout-warn        { --accent: var(--callout-warn); }
+  .callout-tip, .callout-note, .callout-key-takeaway       { --accent: var(--callout-note); }
+  .callout-danger, .callout-error                          { --accent: var(--callout-danger); }
+</style>
+</head>
+<body>
+<div id="content">Waiting for the next answer&hellip;</div>
+<div id="status">Esc &middot; close</div>
+
+<script src="__STREAM_BASE__/vendor/markdown-it.min.js"></script>
+<script src="__STREAM_BASE__/vendor/katex/katex.min.js"></script>
+<script src="__STREAM_BASE__/vendor/katex/auto-render.min.js"></script>
+<script>
+  (function () {
+    // ============================================================
+    // Stream popup. Unlike the one-shot popup (which renders a single
+    // baked-in payload and stops), this page polls STREAM_BASE/latest
+    // every ~800ms and re-renders whenever the focused chat's last
+    // answer changes. The render pipeline below is the one-shot
+    // template's pipeline refactored into a re-callable renderInto().
+    // ============================================================
+
+    // Placeholder __STREAM_BASE__ is substituted to "/<token>" by stream.ps1.
+    // The JS variable is named STREAM_BASE (distinct from the placeholder) so
+    // the substitution never rewrites the variable name or its references.
+    const STREAM_BASE = "__STREAM_BASE__";
+
+    // ---------- Callout transform (module scope; pure, operates on a root) ----------
+    const labelTextRe = /^[^A-Za-z]*([A-Z][\w \-]{1,27})\s*(?:[─━]{3,}|—{3,}|-{3,}|={3,})\s*(.+)$/s;
+    const dashHtmlRe  = /(?:[─━]{3,}|—{3,}|-{3,}|={3,})\s*/;
+    const dashOnlyRe  = /^[\s─━—=\-]+$/;
+    const tailDashRe  = /[\s]*[─━—=\-]{3,}[\s]*$/;
+
+    function stripTrailingDecorations(node) {
+        while (node.lastChild) {
+            const last = node.lastChild;
+            if (last.nodeType === Node.ELEMENT_NODE && last.tagName === "HR") {
+                node.removeChild(last);
+                continue;
+            }
+            if (last.nodeType === Node.TEXT_NODE) {
+                const t = last.textContent;
+                if (dashOnlyRe.test(t)) {
+                    node.removeChild(last);
+                    continue;
+                }
+                const trimmed = t.replace(tailDashRe, "");
+                if (trimmed !== t) {
+                    last.textContent = trimmed;
+                    if (trimmed === "") { node.removeChild(last); continue; }
+                }
+                break;
+            }
+            if (last.nodeType === Node.ELEMENT_NODE) {
+                stripTrailingDecorations(last);
+                if (last.textContent.trim() === "" && last.children.length === 0) {
+                    node.removeChild(last);
+                    continue;
+                }
+                break;
+            }
+            break;
+        }
+    }
+
+    function isClosingMarkerEl(el) {
+        if (!el || el.nodeType !== 1) return false;
+        if (el.tagName === "HR") return true;
+        if (el.tagName === "P" || el.tagName === "DIV") {
+            const t = el.textContent.trim();
+            if (!t) return false;
+            return /^[\s─━—=\-]+$/.test(t) && /[─━—=\-]/.test(t);
+        }
+        return false;
+    }
+
+    function parseLeadingMarker(el) {
+        if (!el || el.nodeType !== 1) return null;
+        let target = el;
+        if ((el.tagName === "UL" || el.tagName === "OL") && el.children.length === 1) {
+            target = el.children[0];
+        }
+        if (target.tagName !== "P" && target.tagName !== "LI") return null;
+
+        const text = target.textContent;
+        const m = text.match(labelTextRe);
+        if (!m) return null;
+        const label = m[1].trim();
+        if (label.length < 2) return null;
+
+        const html = target.innerHTML;
+        const dm = html.match(dashHtmlRe);
+        if (!dm) return null;
+        let bodyHtml = html.substring(dm.index + dm[0].length);
+
+        const allDashesRe = /(?:[─━]{3,}|—{3,}|-{3,}|={3,})/g;
+        let lastDash = null;
+        let dmIter;
+        while ((dmIter = allDashesRe.exec(bodyHtml)) !== null) lastDash = dmIter;
+        let afterHtml = "";
+        let selfClosed = false;
+        if (lastDash) {
+            const closeStart = lastDash.index;
+            const closeEnd   = closeStart + lastDash[0].length;
+            const bodyBefore = bodyHtml.substring(0, closeStart).replace(/[ \t\r\n]+$/, "");
+            const after      = bodyHtml.substring(closeEnd).replace(/^[ \t\r\n]+/, "");
+            bodyHtml   = bodyBefore;
+            afterHtml  = after;
+            selfClosed = true;
+        }
+        return { label, bodyHtml, afterHtml, selfClosed, container: el };
+    }
+
+    function transformCallouts(root) {
+        let el = root.firstElementChild;
+        while (el) {
+            const next = el.nextElementSibling;
+            const parsed = parseLeadingMarker(el);
+            if (!parsed) { el = next; continue; }
+
+            const { label, bodyHtml, afterHtml, selfClosed, container } = parsed;
+
+            const wrap = document.createElement("div");
+            wrap.className = "callout callout-" + label.toLowerCase().replace(/\s+/g, "-");
+            const lab = document.createElement("div");
+            lab.className = "callout-label";
+            lab.textContent = label;
+            const body = document.createElement("div");
+            body.className = "callout-body";
+            wrap.appendChild(lab);
+            wrap.appendChild(body);
+
+            if (bodyHtml && bodyHtml.trim()) {
+                const firstP = document.createElement("p");
+                firstP.innerHTML = bodyHtml;
+                body.appendChild(firstP);
+            }
+
+            let cursorAfter;
+            if (selfClosed) {
+                stripTrailingDecorations(body);
+                container.replaceWith(wrap);
+                let tailNode = null;
+                if (afterHtml.trim()) {
+                    tailNode = document.createElement("p");
+                    tailNode.innerHTML = afterHtml;
+                    wrap.parentNode.insertBefore(tailNode, wrap.nextSibling);
+                }
+                cursorAfter = tailNode || wrap.nextElementSibling;
+                el = cursorAfter;
+                continue;
+            }
+
+            let cur = next;
+            cursorAfter = null;
+            while (cur) {
+                const after = cur.nextElementSibling;
+                if (isClosingMarkerEl(cur)) {
+                    cur.remove();
+                    cursorAfter = after;
+                    break;
+                }
+                if (parseLeadingMarker(cur)) {
+                    cursorAfter = cur;
+                    break;
+                }
+                const trailDashRe2 = /[\s]*[─━—=\-]{3,}[\s]*$/;
+                if (cur.nodeType === Node.ELEMENT_NODE && trailDashRe2.test(cur.textContent || "")) {
+                    body.appendChild(cur);
+                    stripTrailingDecorations(body);
+                    cursorAfter = after;
+                    break;
+                }
+                body.appendChild(cur);
+                cur = after;
+            }
+            if (cur === null) cursorAfter = null;
+
+            stripTrailingDecorations(body);
+            container.replaceWith(wrap);
+            el = cursorAfter;
+        }
+    }
+
+    // ---------- markdown-it + KaTeX setup (created once) ----------
+    const macros = {
+      "\\ket": "\\left|#1\\right\\rangle",
+      "\\bra": "\\left\\langle#1\\right|",
+      "\\braket": "\\left\\langle#1\\right\\rangle",
+      "\\Tr": "\\operatorname{Tr}",
+      "\\tr": "\\operatorname{tr}",
+      "\\dag": "\\dagger",
+      "\\R": "\\mathbb{R}",
+      "\\C": "\\mathbb{C}",
+      "\\Z": "\\mathbb{Z}",
+      "\\N": "\\mathbb{N}",
+      "\\eps": "\\varepsilon"
+    };
+
+    const md = window.markdownit({
+      html: false,
+      linkify: true,
+      typographer: false,
+      breaks: false
+    });
+
+    const SAFE_SCHEME = /^(https?:|mailto:)/i;
+    md.validateLink = function (url) {
+        if (!url) return false;
+        const trimmed = String(url).trim();
+        if (!trimmed) return false;
+        if (trimmed[0] === "#" || trimmed[0] === "/" || trimmed[0] === "?") return true;
+        if (trimmed.indexOf(":") === -1) return true;
+        return SAFE_SCHEME.test(trimmed);
+    };
+
+    const PROTECT_OPEN  = "zzTEXPOPMATHOPENzz";
+    const PROTECT_CLOSE = "zzTEXPOPMATHCLOSEzz";
+    const restoreRe = new RegExp(PROTECT_OPEN + "(\\d+)" + PROTECT_CLOSE, "g");
+
+    function htmlEscape(s) {
+        return s.replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#39;");
+    }
+
+    const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+    const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 12 10 17 19 7"/></svg>';
+
+    function copyText(text) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+      }
+      return new Promise(function (resolve, reject) {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "0";
+        ta.style.left = "0";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.select();
+        try {
+          const ok = document.execCommand("copy");
+          document.body.removeChild(ta);
+          ok ? resolve() : reject(new Error("execCommand failed"));
+        } catch (err) {
+          document.body.removeChild(ta);
+          reject(err);
+        }
+      });
+    }
+
+    function attachCopyButtons(target) {
+      target.querySelectorAll("pre").forEach(function (pre) {
+        const code = pre.querySelector("code");
+        if (!code) return;
+        const wrap = document.createElement("div");
+        wrap.className = "code-wrap";
+        pre.parentNode.insertBefore(wrap, pre);
+        wrap.appendChild(pre);
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "copy-btn";
+        btn.title = "Copy";
+        btn.setAttribute("aria-label", "Copy code");
+        btn.innerHTML = COPY_SVG;
+        btn.addEventListener("click", function () {
+          copyText(code.textContent).then(function () {
+            btn.classList.add("copied");
+            btn.innerHTML = CHECK_SVG;
+            btn.setAttribute("aria-label", "Copied");
+            setTimeout(function () {
+              btn.classList.remove("copied");
+              btn.innerHTML = COPY_SVG;
+              btn.setAttribute("aria-label", "Copy code");
+            }, 1100);
+          }).catch(function () {
+            btn.title = "Copy failed";
+          });
+        });
+        wrap.appendChild(btn);
+      });
+    }
+
+    // ---------- Re-callable render ----------
+    // protectedMath is per-call (reset each render); everything else above is
+    // created once. Mirrors the one-shot template's pipeline exactly.
+    function renderInto(target, raw) {
+      if (typeof raw !== "string") raw = String(raw == null ? "" : raw);
+
+      const protectedMath = [];
+      function protect(content, display) {
+        const idx = protectedMath.push({ content, display }) - 1;
+        return PROTECT_OPEN + idx + PROTECT_CLOSE;
+      }
+      function preprocessProtectingMath(input) {
+        const segmentRe = /(```[\s\S]*?```|`[^`\n]*`)/g;
+        const parts = input.split(segmentRe);
+        return parts.map(function (p) {
+          if (!p) return p;
+          if (p.startsWith("```")) return p;
+          if (p.startsWith("`") && p.endsWith("`") && p.length > 1) return p;
+          let s = p;
+          s = s.replace(/\$\$([\s\S]+?)\$\$/g, function (_, m) { return protect(m, true); });
+          s = s.replace(/\\\[([\s\S]+?)\\\]/g, function (_, m) { return protect(m, true); });
+          s = s.replace(/\\\(([\s\S]+?)\\\)/g, function (_, m) { return protect(m, false); });
+          s = s.replace(/\$(?!\s)([^\$\n]+?)(?<!\s)\$/g, function (_, m) { return protect(m, false); });
+          return s;
+        }).join("");
+      }
+
+      const preprocessed = preprocessProtectingMath(raw);
+      const html = md.render(preprocessed);
+      const restored = html.replace(restoreRe, function (_, idx) {
+        const m = protectedMath[Number(idx)];
+        const safe = htmlEscape(m.content);
+        return m.display ? "$$" + safe + "$$" : "$" + safe + "$";
+      });
+
+      target.innerHTML = restored;
+      transformCallouts(target);
+
+      try {
+        renderMathInElement(target, {
+          delimiters: [
+            { left: "$$",  right: "$$",  display: true  },
+            { left: "\\[", right: "\\]", display: true  },
+            { left: "$",   right: "$",   display: false },
+            { left: "\\(", right: "\\)", display: false }
+          ],
+          ignoredTags: ["script", "noscript", "style", "textarea", "pre", "code", "option"],
+          throwOnError: false,
+          errorColor: "#f7768e",
+          macros: macros,
+          strict: false
+        });
+      } catch (e) {
+        const err = document.createElement("pre");
+        err.style.color = "#f7768e";
+        err.textContent = "KaTeX render error: " + e.message;
+        target.appendChild(err);
+      }
+
+      attachCopyButtons(target);
+    }
+
+    // ---------- Live follow + Left/Right message navigation ----------
+    // The page polls /latest (count + newest message) for live follow. Left/Right
+    // step through the full prompt+answer history via /msg?i=N; returning to the
+    // newest re-engages live follow. Up/Down keep their default scroll behavior.
+    const content = document.getElementById("content");
+    const status  = document.getElementById("status");
+
+    let count = 0;             // total exchanges
+    let following = true;      // tracking the newest exchange (live)
+    let viewIndex = -1;        // exchange index currently shown
+    let latestPrompt = "";     // newest exchange's question
+    let latestAnswer = "";     // newest exchange's answer
+    let shownKey = null;       // dedupe identical re-renders
+
+    function setStatus(text, cls) {
+      status.textContent = text;
+      status.className = cls || "";
+    }
+
+    function fetchJson(path) {
+      // Timeout guard via AbortController (universally supported, unlike
+      // AbortSignal.timeout which needs Edge 103+).
+      const ctrl = new AbortController();
+      const tid = setTimeout(function () { ctrl.abort(); }, 3000);
+      return fetch(STREAM_BASE + path, { cache: "no-store", signal: ctrl.signal })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .finally(function () { clearTimeout(tid); });
+    }
+
+    function renderExchange(promptMd, answerMd) {
+      content.className = "";
+      content.innerHTML = "";
+      // Question first, in its dimmed frame...
+      if (promptMd && promptMd.trim() !== "") {
+        const pf = document.createElement("div");
+        pf.className = "prompt-frame";
+        content.appendChild(pf);
+        renderInto(pf, promptMd);
+      }
+      // ...then the answer on the same page.
+      const ans = document.createElement("div");
+      ans.className = "answer";
+      content.appendChild(ans);
+      if (answerMd && answerMd.trim() !== "") {
+        renderInto(ans, answerMd);
+      } else {
+        ans.textContent = "Waiting for the answer…";
+      }
+      window.scrollTo(0, 0);
+    }
+
+    function showLatest() {
+      const key = "L:" + latestPrompt + "" + latestAnswer;
+      if (key !== shownKey) { renderExchange(latestPrompt, latestAnswer); shownKey = key; }
+      const pos = count > 0 ? (count + " / " + count + " · ") : "";
+      setStatus(pos + "live · ← history", "");
+    }
+
+    function showMessage(i) {
+      fetchJson("/msg?i=" + i).then(function (data) {
+        if (!data) { setStatus("reconnecting…", "stale"); return; }
+        viewIndex = data.index;
+        count = data.count;
+        const key = "M:" + data.index + "" + (data.prompt || "") + "" + (data.answer || "");
+        if (key !== shownKey) { renderExchange(data.prompt, data.answer); shownKey = key; }
+        setStatus((data.index + 1) + " / " + data.count + " · → newer", "stale");
+      }).catch(function () { setStatus("server closed", "down"); });
+    }
+
+    function navigate(delta) {
+      if (count <= 0) return;
+      const base = following ? (count - 1) : viewIndex;
+      let target = base + delta;
+      if (target < 0) target = 0;
+      if (target > count - 1) target = count - 1;
+      if (target >= count - 1) {
+        following = true;
+        viewIndex = count - 1;
+        showLatest();
+      } else {
+        following = false;
+        viewIndex = target;
+        showMessage(target);
+      }
+    }
+
+    // KaTeX lazy-loads its web fonts on the first math render; served over
+    // loopback, that first paint can briefly use fallback metrics. Once the
+    // fonts settle, re-render the current view once so the math snaps correct.
+    let fontsSettled = false;
+    function settleFontsOnce() {
+      if (fontsSettled) return;
+      fontsSettled = true;
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(function () {
+          shownKey = null;
+          if (following) showLatest();
+          else if (viewIndex >= 0) showMessage(viewIndex);
+        });
+      }
+    }
+
+    function poll() {
+      fetchJson("/latest").then(function (data) {
+        if (!data) { setStatus("reconnecting…", "stale"); return; }
+        count = (typeof data.count === "number") ? data.count : count;
+        latestPrompt = (typeof data.prompt === "string") ? data.prompt : "";
+        latestAnswer = (typeof data.answer === "string") ? data.answer : "";
+        if (following) { viewIndex = count - 1; showLatest(); }
+        settleFontsOnce();
+      }).catch(function () {
+        setStatus("server closed", "down");
+      }).then(function () {
+        setTimeout(poll, 800);
+      });
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage("close");
+        else window.close();
+        return;
+      }
+      if (e.key === "ArrowLeft")  { e.preventDefault(); navigate(-1); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); navigate(1);  return; }
+      // ArrowUp / ArrowDown / PageUp / PageDown keep default scroll behavior.
+    });
+
+    poll();
+  })();
+</script>
+</body>
+</html>

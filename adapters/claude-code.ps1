@@ -407,15 +407,62 @@ $claudeFindFocused = {
         }
     }
 
-    # UUID-from-cmdline match: each candidate's --resume <UUID> arg is the
-    # canonical session identifier set by Claude itself. This survives the
-    # divergence between WT tab title and aiTitle that occurs after session
-    # branching, or when Claude derives tab titles from a separate signal
-    # (project name vs LLM summary). Map UUIDs to their jsonl files in the
-    # corresponding project dirs, drop any excluded by other-tab matching,
-    # and pick if exactly one remains. Only consults the descendant tree --
-    # orphan claudes (parent chain broken) are still handled by the title /
-    # segment / mtime passes below.
+    # PRIMARY signal: exact match of the SELECTED-tab title against ai-title.
+    # A positive match of the foreground title identifies the focused chat
+    # directly and is stronger evidence than the UUID-match below. UUID-match
+    # only proves a --resume session is "not one of the OTHER tabs" (a negative
+    # filter via tab-scope exclusion); a background or split-pane claude whose
+    # aiTitle matches NO open tab also survives that filter and, if it is the
+    # lone survivor, gets mispicked. So the exact title match runs first;
+    # UUID-match is the fallback for the title-vs-aiTitle divergence case (tab
+    # title derived from project name) where this finds nothing. Fork-leaf is
+    # applied so a branched chat still resolves to its freshest descendant; it
+    # walks forward from whatever node the title matched (the chain root OR an
+    # already-branched mid-chain child whose aiTitle carried over), so applying
+    # it to a non-root match is safe -- the mtime guard stops at the leaf.
+    # Pass 1 -- descendant-tree project dirs (more trusted).
+    # Pass 2 -- the global superset (orphan claudes whose parent chain does
+    #           not reach WT); only consulted when global adds dirs.
+    $titleSources = @()
+    if ($foregroundTitle) { $titleSources += $foregroundTitle }
+    if ($wtTabName -and ($wtTabName -ne $foregroundTitle)) { $titleSources += $wtTabName }
+    foreach ($t in $titleSources) {
+        $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $projectDirs
+        if ($match) {
+            $mDir  = Split-Path -Parent $match.FullName
+            $mLeaf = Resolve-ClaudeForkLeaf -baseJsonl $match -projectDir $mDir
+            if ($mLeaf -and $mLeaf.FullName -ne $match.FullName) {
+                Log "Title-match picked (fork leaf): $($mLeaf.FullName)"
+                return $mLeaf
+            }
+            Log "Title-match picked: $($match.FullName)"
+            return $match
+        }
+    }
+    if ($globalProjectDirs.Count -gt $projectDirs.Count) {
+        foreach ($t in $titleSources) {
+            $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $globalProjectDirs
+            if ($match) {
+                $mDir  = Split-Path -Parent $match.FullName
+                $mLeaf = Resolve-ClaudeForkLeaf -baseJsonl $match -projectDir $mDir
+                if ($mLeaf -and $mLeaf.FullName -ne $match.FullName) {
+                    Log "Title-match via global enum (orphan claude, fork leaf): $($mLeaf.FullName)"
+                    return $mLeaf
+                }
+                Log "Title-match via global enum (orphan claude): $($match.FullName)"
+                return $match
+            }
+        }
+    }
+
+    # UUID-from-cmdline match (fallback when the exact title match above finds
+    # nothing -- i.e. the WT tab title diverges from the session aiTitle, e.g.
+    # after branching or when Claude derives the tab title from project name).
+    # Each candidate's --resume <UUID> arg is the canonical session identifier
+    # set by Claude itself. Map UUIDs to their jsonl files in the corresponding
+    # project dirs, drop any excluded by other-tab matching, and pick if exactly
+    # one remains. Only consults the descendant tree -- orphan claudes (parent
+    # chain broken) are still handled by the segment / mtime passes below.
     $uuidMatches = [System.Collections.Generic.List[System.IO.FileInfo]]::new()
     foreach ($ctx in $candidateCtx) {
         if (-not $ctx.Uuid) { continue }
@@ -447,28 +494,6 @@ $claudeFindFocused = {
         return $picked
     } elseif ($uuidMatches.Count -gt 1) {
         Log "UUID-match ambiguous (multiple --resume candidates remain after tab exclusion), falling through"
-    }
-
-    # PRIMARY signal: match the WT/window title against ai-title.
-    # Pass 1 -- only the descendant-tree project dirs (more trusted).
-    # Pass 2 -- the global superset (catches orphan claudes whose
-    #           parent chain doesn't reach WT). Only consulted when pass 1
-    #           finds nothing, and only when global adds dirs over pass 1.
-    $titleSources = @()
-    if ($foregroundTitle) { $titleSources += $foregroundTitle }
-    if ($wtTabName -and ($wtTabName -ne $foregroundTitle)) { $titleSources += $wtTabName }
-    foreach ($t in $titleSources) {
-        $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $projectDirs
-        if ($match) { return $match }
-    }
-    if ($globalProjectDirs.Count -gt $projectDirs.Count) {
-        foreach ($t in $titleSources) {
-            $match = Find-ClaudeSessionByTitle -targetTitle $t -projectDirs $globalProjectDirs
-            if ($match) {
-                Log "Title-match via global enum (orphan claude): $($match.FullName)"
-                return $match
-            }
-        }
     }
 
     # Segment-match fallback: when the tab title was manually renamed to a
