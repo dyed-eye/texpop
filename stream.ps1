@@ -448,6 +448,11 @@ function Get-ClaudeMessages {
         $obj = $null
         try { $obj = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
         if (-not $obj.message) { continue }
+        # Skill invocations inject the entire SKILL.md into the transcript as a
+        # synthetic user turn tagged isMeta=true (Claude Code also uses isMeta for
+        # other system-injected user content). These are not real prompts; without
+        # this guard the "You asked" frame renders the whole skill body.
+        if ($obj.isMeta) { continue }
         $role = $obj.message.role
 
         if ($role -eq 'user') {
@@ -461,6 +466,22 @@ function Get-ClaudeMessages {
                     if ($c.type -eq 'text' -and $c.text) { [void]$sb.Append($c.text) }
                 }
                 if ($sb.Length -gt 0) { $txt = $sb.ToString() }
+            }
+            # Slash-command / skill invocations are stored as a tag wrapper:
+            #   <command-message>name</command-message>
+            #   <command-name>/name</command-name>
+            #   <command-args>what the user typed</command-args>
+            # Show the command plus its args (what the user actually typed), not
+            # the raw tags.
+            if ($txt -and $txt.Contains('<command-name>')) {
+                $nm = [regex]::Match($txt, '<command-name>([^<]*)</command-name>')
+                $ar = [regex]::Match($txt, '<command-args>([\s\S]*?)</command-args>')
+                if ($nm.Success) {
+                    $cmd = $nm.Groups[1].Value.Trim()
+                    $ca = ''
+                    if ($ar.Success) { $ca = $ar.Groups[1].Value.Trim() }
+                    if ($ca) { $txt = "$cmd $ca" } else { $txt = $cmd }
+                }
             }
             # Only real prompts (tool_result-only user lines yield no text).
             if ($txt -and $txt.Trim()) {
