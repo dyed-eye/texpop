@@ -757,6 +757,35 @@ function Find-FocusedSession {
 
     if ($candidates.Count -eq 0) {
         Log "No descendant processes of foreground"
+        # Recovery for the empty-tree case. The descendant walk comes up empty
+        # when the focused chat's claude.exe is an orphan (its parent chain does
+        # not reach the foreground WindowsTerminal.exe -- e.g. a tab adopted from
+        # a prior WT instance), and in focus mode UIA also yields no tab names.
+        # Both per-tab signals are then gone, so without this the run falls
+        # through to global-newest and picks an unrelated chat. The foreground
+        # window title still equals the focused chat's aiTitle, so hand the title
+        # to the claude adapter and let its global claude.exe enumeration +
+        # title match resolve it. Gated on WindowsTerminal foreground + a
+        # non-empty title so we never do a global title sweep for an unrelated
+        # foreground app.
+        if (($fgName -ieq 'WindowsTerminal') -and $fgTitle) {
+            $claudeAdapter = $script:Adapters |
+                Where-Object { $_.Name -eq 'claude-code' } | Select-Object -First 1
+            if ($claudeAdapter) {
+                Log "Empty-tree recovery: claude global title match for '$fgTitle'"
+                $recovered = $null
+                try {
+                    $recovered = & $claudeAdapter.FindFocusedSession `
+                        $candidates $fgTitle $wtTabName $wtOtherTabs
+                } catch {
+                    Log "Empty-tree recovery threw: $_"
+                }
+                if ($recovered) {
+                    return @{ File = $recovered; Adapter = $claudeAdapter }
+                }
+                Log "Empty-tree recovery: no title match"
+            }
+        }
         return $null
     }
 

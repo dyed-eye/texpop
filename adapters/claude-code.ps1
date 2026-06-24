@@ -316,7 +316,14 @@ $claudeFindFocused = {
                     (($name -eq 'node.exe') -and ($cmd -match '(?i)\bclaude\b'))
         if ($isClaude) { $claudeCandidates += $c }
     }
-    if (-not $claudeCandidates) { return $null }
+    # Normally this adapter is dispatched only after the descendant walk found a
+    # claude candidate, so $claudeCandidates is non-empty here. show.ps1's
+    # empty-tree recovery, however, calls us with NO descendants on purpose so
+    # the global claude.exe enumeration + title match below can resolve an
+    # orphan / focus-mode chat from the window title alone. Keep going in that
+    # case; only bail when there is also no title to match against.
+    $haveTitle = [bool]$foregroundTitle -or [bool]$wtTabName
+    if (($claudeCandidates.Count -eq 0) -and (-not $haveTitle)) { return $null }
 
     # Collect unique project dirs from candidate CWDs. Cache per-candidate
     # context (cwd, project dir, --resume UUID) so the UUID-match pass below
@@ -528,16 +535,26 @@ $claudeFindFocused = {
         }
     }
 
-    # Safety gate: when Windows Terminal is foreground AND multiple
-    # distinct Claude project dirs are running (descendant + orphan),
-    # the mtime fallback is just a guess across unrelated chats. A user
-    # who renames a WT tab manually (overriding aiTitle) deliberately
-    # breaks the title-match channel; in that case the right answer is
-    # "do not open a popup" rather than show whichever chat happens to
-    # have the newest write. The flag tells show.ps1's main to skip the
-    # global-newest fallback too.
-    if ($wtTabName -and $globalProjectDirs.Count -gt 1) {
-        Log "Refusing fallback: WT context with $($globalProjectDirs.Count) candidate project dirs (descendant + orphan) and no title/segment match"
+    # Safety gate: refuse to guess when multiple distinct Claude project dirs
+    # are running (descendant + orphan) and we have no reliable per-tab signal.
+    # The mtime fallback would just be a guess across unrelated chats. Fires in
+    # two situations:
+    #   (a) Windows Terminal is foreground with a manually-renamed tab
+    #       ($wtTabName set) -- the user deliberately broke the title-match
+    #       channel by overriding the aiTitle.
+    #   (b) The empty-tree recovery path (no descendant candidates -- e.g. focus
+    #       mode hid the UIA tab strip AND the focused claude is an orphan whose
+    #       parent chain never reached the WT window). Here $wtTabName is
+    #       structurally null, but falling through would let show.ps1's
+    #       global-newest pick whichever chat wrote last -- the exact bug this
+    #       recovery path exists to prevent.
+    # In both cases the right answer is "do not open a popup" rather than show
+    # the wrong chat. The flag tells show.ps1's main to skip global-newest too.
+    # (Single-chat recovery, globalProjectDirs.Count -eq 1, is left to fall
+    # through: global-newest reliably resolves to the lone active chat.)
+    $noDescendants = ($claudeCandidates.Count -eq 0)
+    if (($wtTabName -or $noDescendants) -and $globalProjectDirs.Count -gt 1) {
+        Log "Refusing fallback: $($globalProjectDirs.Count) candidate project dirs (descendant + orphan), no title/segment match (renamedTab=$([bool]$wtTabName) noDescendants=$noDescendants)"
         $script:adapterAborted = $true
         return $null
     }
