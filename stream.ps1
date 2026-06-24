@@ -467,6 +467,19 @@ function Get-ClaudeMessages {
                 }
                 if ($sb.Length -gt 0) { $txt = $sb.ToString() }
             }
+            # Local shell escapes (`! cmd`) and their captured output are
+            # persisted as user-type messages whose content is wrapped in
+            # <bash-input>/<bash-stdout>/<bash-stderr> tags (older Claude Code
+            # used <local-command-stdout>/<local-command-stderr>). These are not
+            # conversation prompts; rendering them as "You asked" pages splits a
+            # real exchange in two -- the second page being raw shell output.
+            # Skip them, the same way tool_result-only user lines are skipped.
+            if ($txt) {
+                $txtTrim = $txt.TrimStart()
+                if ($txtTrim -match '^<(bash-input|bash-stdout|bash-stderr|local-command-stdout|local-command-stderr)>') {
+                    continue
+                }
+            }
             # Slash-command / skill invocations are stored as a tag wrapper:
             #   <command-message>name</command-message>
             #   <command-name>/name</command-name>
